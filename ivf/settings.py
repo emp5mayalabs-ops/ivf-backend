@@ -30,7 +30,7 @@ SECRET_KEY = 'django-insecure-@*xzj18th@x)$t4ia2gqcbsww+ckwt$6go&zg5q$7o$z=5nv0k
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.environ.get('DEBUG', 'True') == 'True' #now debug stays true in this device 
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['*']
 
 #look inside app dir
 sys.path.insert(0, os.path.join(BASE_DIR, 'apps'))
@@ -160,7 +160,7 @@ CSRF_COOKIE_SAMESITE = 'Lax'
 CSRF_TRUSTED_ORIGINS = [
     'http://localhost:5173',
     'http://127.0.0.1:5173',
-    'postgresql://ivf_project_db_user:VLssr1Pc7bcCiR5JPwlyxeaQkxR0ACF4@dpg-d8246vegvqtc73db9deg-a/ivf_project_db',
+    'https://ivf-backend-ki9p.onrender.com',
     #vercel frontend link
 ]
 # CSRF_COOKIE_SECURE = True  
