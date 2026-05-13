@@ -65,7 +65,6 @@ INSTALLED_APPS = [
     'patients',
     'pharmacy',
     'reporting',
-    'static',
     'telehealth',
 ]
 
