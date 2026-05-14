@@ -69,7 +69,7 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
-    'corsheaders.middleware.CorsMiddleware',
+    'corsheaders.middleware.CorsMiddleware', 
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
@@ -77,7 +77,7 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
-    'django.contrib.auth.middleware.LoginRequiredMiddleware',
+    # 'django.contrib.auth.middleware.LoginRequiredMiddleware',  ← REMOVE THIS
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
@@ -195,6 +195,13 @@ CORS_ALLOWED_ORIGINS=[
     'http://127.0.0.1:5173',
     "https://ivf-frontend.vercel.app",
     "http://localhost:3000",
+]
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'authorization',
+    'content-type',
+    'x-csrftoken',  # ← critical for your CSRF interceptor in Client.js
+    'x-requested-with',
 ]
 
 CORS_ALLOW_CREDENTIALS = True  
