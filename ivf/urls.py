@@ -17,16 +17,7 @@ Including another URLconf
 from django.contrib import admin
 from django.urls import path,include
 from django.views.generic.base import RedirectView
-from django.http import JsonResponse
-from django.db import connection
 
-def run_migrations(request):
-    from django.core.management import call_command
-    try:
-        call_command('migrate', '--run-syncdb')
-        return JsonResponse({"status": "migrations complete"})
-    except Exception as e:
-        return JsonResponse({"status": "error", "detail": str(e)})
 
 urlpatterns = [
 	path('',RedirectView.as_view(url='api/accounts/login/',permanent=False)),
@@ -35,6 +26,5 @@ urlpatterns = [
 	path('api/departments/',include('departments.urls')),
 	path('api/',include('patients.urls')),
 	path('api/emr/',include('emr.urls')),
-    path('api/run-migrations/', run_migrations),
 ]
 
