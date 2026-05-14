@@ -279,7 +279,7 @@ class LoginAuditLog(models.Model):
     logout_time=models.DateTimeField(null=True,blank=True)
     ip_address=models.GenericIPAddressField(null=True,blank=True)
     user_agent=models.TextField(null=True,blank=True)
-    last_seen=models.DateTimeField(default=timezone.now())
+    last_seen=models.DateTimeField(default=timezone.now)
     
     is_active_session=models.BooleanField(default=True)
     class Meta:
