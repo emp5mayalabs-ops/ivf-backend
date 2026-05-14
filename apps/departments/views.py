@@ -173,7 +173,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
 				code=dept['code'],
 				defaults={
 					'name': dept['name'],
-					'description': dept['description']
+					'description': dept.get('description',''),
 				},
 			)
 			(created if was_created else existing).append(dept['name'])
