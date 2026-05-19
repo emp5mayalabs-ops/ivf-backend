@@ -1,87 +1,158 @@
-from django.shortcuts import render
-from rest_framework import viewsets
-from .serializer import PatientUserCreateSerializer
-from accounts.models import User,ReceptionistProfile
-from rest_framework.parsers import FormParser,MultiPartParser
-from rest_framework.renderers import TemplateHTMLRenderer,JSONRenderer
-from .permissions import AppointmentPermissions
+from rest_framework import viewsets,status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.shortcuts import redirect
-from django.contrib.auth import update_session_auth_hash
+from rest_framework.parsers import JSONParser,FormParser,MultiPartParser
+from django.utils import timezone
+from django.shortcuts import get_object_or_404
 
-class ReceptionistView(viewsets.ModelViewSet):
-    queryset=User.objects.filter(role__in=['PAT','DON'])
-    serializer_class=PatientUserCreateSerializer
-    permission_classes=[AppointmentPermissions]
-    parser_classes=[FormParser,MultiPartParser]
-    renderer_classes=[TemplateHTMLRenderer,JSONRenderer]
+from .models import OPTicket
+from .serializer import OPTicketSerializer,PatientBasicSerializer,DoctorChoiceSerializer
+from .permissions import ReceptionistPermission
+from patients.models import PatientProfile
+from accounts.models import User
+from departments.models import Department
 
-    @action(detail=False,methods=['get'],url_path='patient')
-    def onboard(self,request):
-        return Response({},template_name='receptionist/create_patient.html')
-    def list(self,request,*args,**kwargs):
-        queryset=self.get_queryset()
+	
+class ReceptionistPatientViewSet(viewsets.ModelViewSet):
+	permission_classes=[ReceptionistPermission]
+	parser_classes=[JSONParser,FormParser,MultiPartParser]
+	serializer_class=PatientBasicSerializer
+	http_method_names=['get','patch','head','options']
+	def get_queryset(self):
+		qs=PatientProfile.objects.select_related('user','assigned_doctor').order_by('-registered_on')
+		search=self.request.query_params.get('search','')
+		stat=self.request.query_params.get('status','')
+		if search:
+			qs=(
+				qs.filter(user__full_name__icontains=search) |
+				qs.filter(patient_id__icontains=search) |
+				qs.filter(user__email__icontains=search) |
+				qs.filter(phone__icontains=search)
+            )
+		if stat:
+			qs=qs.filter(status=stat)
+		return qs.distinct()
+	@action(detail=True, methods=['get'], url_path='tickets')
+	def patient_tickets(self,request,pk=None):
+		patient=self.get_object()
+		tickets=OPTicket.objects.filter(patient=patient).select_related('assigned_doctor','department','created_by').order_by('-date','-token_number')
+		serializer=OPTicketSerializer(tickets,many=True)
+		return Response({
+			'patient_id':patient.patient_id,
+			'count':tickets.count(),
+			'tickets':serializer.data,
+        })				
+    
+class OPTicketViewSet(viewsets.ModelViewSet):
+	permission_classes=[ReceptionistPermission]
+	parser_classes=[JSONParser,FormParser,MultiPartParser]
+	serializer_class=OPTicketSerializer
+	http_method_names=['get','post','patch','head','options']
+	def get_queryset(self):
+		qs=OPTicket.objects.select_related(
+		    'patient__user','assigned_doctor','department','created_by'
+        )
+		date=self.request.query_params.get('date','')
+		stat=self.request.query_params.get('status','')
+		dept=self.request.query_params.get('department','')
+		if date:
+			qs=qs.filter(date=date)
+		else:
+		    qs=qs.filter(date=timezone.now().date())
+		if stat:
+		    qs=qs.filter(status=stat)
+		if dept:
+			qs=qs.filter(department_id=dept)
+		return qs.order_by('token_number')
 
-        patients=queryset.filter(role='PAT')
-        donors=queryset.filter(role='DON')
-        
-        if request.accepted_renderer.format=='html':
-            return Response({
-                'patients':patients,
-                'donors':donors
-                },
-                template_name='receptionist/patient-donor_list.html'
-                )
-        return super().list(request,*args,**kwargs)
-    
-    
-    def create(self,request,*args,**kwargs):
-        response=super().create(request,*args,**kwargs)
-        if request.accepted_renderer.format=='html':
-            return redirect('appointments:receptionist_view-list')
-        return response
-    
-    @action(detail=False,methods=['get'],url_path='dashboard')
-    def dashboard(self,request):
-        patients_count=User.objects.filter(role__in=['PAT']).count()
-        donors_count=User.objects.filter(role__in=['DON']).count()
-        if request.accepted_renderer.format=='html':
-            return Response({'patients_count':patients_count,'donor_count':donors_count},template_name='receptionist/reg_dashboard.html')
-        return Response({'patients_count':patients_count,'donors_count':donors_count})
-    
-    @action(detail=False,methods=['get','post'],url_path='my_profile')
-    def my_profile(self,request):
-        user=request.user
-        is_editing=request.GET.get('edit') == 'true'
-        change_password=request.GET.get('password') == 'true'
-        if request.method=='GET':
-            context={
-                'user':user,
-                'is_editing':is_editing,
-                'change_password':change_password
+	def get_serializer_context(self):
+		ctx=super().get_serializer_context()
+		ctx['request']=self.request
+		return ctx
+	@action(detail=False, methods=['get'], url_path='today') 
+	def today(self,request):
+		today=timezone.now().date()
+		tickets=OPTicket.objects.filter(date=today).select_related('patient__user','assigned_doctor','department').order_by('token_number')
+		summary={
+			'total':tickets.count(),
+			'waiting':tickets.filter(status='WAITING').count(),
+			'in_consult':tickets.filter(status='IN_CONSULT').count(),
+			'done':tickets.filter(status='DONE').count(),
+			'cancelled':tickets.filter(status='CANCELLED').count(),
+			'next_token':OPTicket.next_token_for_today(),
+        }
+		serializer=OPTicketSerializer(tickets,many=True)
+		return Response({'date':str(today),'summary':summary,'tickets':serializer.data})
+	@action(detail=True,methods=['patch'],url_path='status')
+	def update_status(self,request,pk=None):
+		ticket=self.get_object()
+		new_status=request.data.get('status')
+		if new_status not in dict(OPTicket.STATUS_CHOICES):
+			return Response({'detail':'Invalid status'},status=400)
+		ticket.status=new_status
+		ticket.save()
+		return Response(OPTicketSerializer(ticket).data)
+	@action(detail=False,methods=['get'],url_path='doctors')
+	def doctors(self,request):
+		doctors=User.objects.filter(
+			role__in=['END','GYN','ANE'],is_active=True
+        ).order_by('full_name')
+		return Response(DoctorChoiceSerializer(doctors,many=True).data)
+	@action(detail=False,methods=['get'],url_path='departments')
+	def departments(self,request):
+		depts=Department.objects.filter(is_active=True).values('id','name','code')
+		return Response(list(depts))
+
+class ReceptionistDashboardView(viewsets.ViewSet):
+	permission_classes=[ReceptionistPermission]
+	@action(detail=False,methods=['get'],url_path='')
+	def dashboard(self,request):
+		today=timezone.now().date()
+		patients_today=PatientProfile.objects.filter(date=today)
+		today_tickets=OPTicket.objects.filter(date=today)
+		tickets_today=today_tickets.count()
+		waiting=today_tickets.filter(status='WAITING').count()
+		in_consult=today_tickets.filter(status='IN_CONSULT').count()
+		done=today_tickets.filter(status='DONE').count()
+		cancelled=today_tickets.filter(status='CANCELLED').count()
+		next_token=OPTicket.next_token_for_today()
+		total_patients=PatientProfile.objects.count()
+		recent_patients=PatientProfile.objects.filter(registered_on__date=today).select_related('user').order_by('-registered_on')[:8]
+		recent_list=[
+			{
+				'full_name':p.user.full_name,
+				'patient_id':p.patient_id,
+				'registered_on':p.registered_on.isoformat() if p.registered_on else None,
             }
-            if user.role=='REC':
-                profile,_=ReceptionistProfile.objects.get_or_create(user=user)
-                context['profile']=user.receptionist_profile
-            return Response(context,template_name='receptionist/my_profile.html')
-        
-        if request.method=='POST':
-            if 'new_password' in request.data:
-                old_pass=request.data.get('old_password')
-                new_pass=request.data.get('new_password')
-                if user.check_password(old_pass):
-                    user.set_password(new_pass)
-                    user.save()
-                    update_session_auth_hash(request,user)
-                    return redirect('appointments:receptionist_view-my-profile')
-                else:
-                    return Response({'user':user,'error':'Incorrect Old Password'},template_name='receptionist/my_profile.html')
-            if user.role =='REC':
-                profile=user.receptionist_profile
-                profile.desk_location=request.data.get('desk_location','')
-                profile.contact_number=request.data.get('contact_number','')
-                profile.save()
-                profile.refresh_from_db()
-            return redirect('appointments:receptionist_view-my-profile')
-    
+			for p in recent_patients
+        ]
+		return Response({
+			'receptionist_name':request.user.full_name,
+			'patients_today':patients_today,
+			'tickets_today':tickets_today,
+			'waiting':waiting,
+			'in_consult':in_consult,
+			'done':done,
+			'cancelled':cancelled,
+			'next_token':next_token,
+			'total_patients':total_patients,
+			'recent_patients':recent_list,
+        })
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# def create(self,request,*args,**kwargs):
+#         response=super().create(request,*args,**kwargs)
+#         return response

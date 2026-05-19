@@ -19,7 +19,6 @@ from django.utils import timezone
 from datetime import timedelta
 from django.db.models import Count
 from .permissions import StaffPermission
-from appointments.views import ReceptionistView
 from hr.models import HRManagerProfile
 from accounts.models import ReceptionistProfile,ClinicalCounsellorProfile,FinancialCounsellorProfile,EmbryologistProfile,AnesthesiologistProfile,NurseProfile
 from adv_reproduction.models import ReproductiveEndocrinologistProfile
