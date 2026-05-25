@@ -15,8 +15,6 @@ import sys
 import os
 import dj_database_url
 
-ALLOWED_HOSTS = ['*']
-
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -106,10 +104,20 @@ WSGI_APPLICATION = 'ivf.wsgi.application'
 
 DATABASES = {
     'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': 'ivf_hims',
+        'USER': 'postgres',
+        'PASSWORD': '2475',
+        'HOST': 'localhost',
+        'PORT': '5432',
     }
 }
+# DATABASES = {
+#     'default': {
+#         'ENGINE': 'django.db.backends.sqlite3',
+#         'NAME': BASE_DIR / 'db.sqlite3',
+#     }
+# }
 
 db_from_env = dj_database_url.config(conn_max_age=600)
 if db_from_env:
@@ -151,15 +159,21 @@ REST_FRAMEWORK = {
 SESSION_COOKIE_AGE = 60 * 60 * 8       # 8-hour session
 SESSION_COOKIE_HTTPONLY = True          # JS cannot read sessionid
 # Session & CSRF cookies must work cross-domain
-CSRF_COOKIE_SAMESITE = "None"
-CSRF_COOKIE_SECURE = True
-SESSION_COOKIE_SAMESITE = "None"
-SESSION_COOKIE_SECURE = True
+# if DEBUG:
+CSRF_COOKIE_SECURE = False
+SESSION_COOKIE_SECURE = False
+CSRF_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SAMESITE = "Lax"
+# else:
+#     CSRF_COOKIE_SECURE = True
+#     SESSION_COOKIE_SECURE = True
+#     CSRF_COOKIE_SAMESITE = "None"
+#     SESSION_COOKIE_SAMESITE = "None"
 
 # 5. CSRF settings
 CSRF_COOKIE_HTTPONLY = False            # React must be able to read this
 CSRF_TRUSTED_ORIGINS = [
-    'http://localhost:5173',
+    'http://127.0.0.1:5173',
     'http://127.0.0.1:5173',
     'https://ivf-backend-ki9p.onrender.com',
     'https://ivf-frontend.vercel.app'

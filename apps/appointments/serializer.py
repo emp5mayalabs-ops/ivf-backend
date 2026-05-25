@@ -4,6 +4,7 @@ from patients.models import PatientProfile
 from accounts.models import User
 
 class OPTicketSerializer(serializers.ModelSerializer):
+	date = serializers.DateField(read_only=True)
 	patient_name=serializers.SerializerMethodField()
 	patient_id_str=serializers.SerializerMethodField()
 	doctor_name=serializers.SerializerMethodField()
@@ -15,7 +16,7 @@ class OPTicketSerializer(serializers.ModelSerializer):
 	class Meta:
 		model=OPTicket
 		fields=[
-	    	'id','token_number','date','patient','patient_name','patient_id_str','assigned_doctor','doctor_name','doctor_role','department','department_name','visit_reason','visit_reason_display','chief_complaint','status','status_display','created_by','created_by_name','created_at','updated_at',
+	    	'id','token_number','date','patient','patient_name','patient_id_str','assigned_doctor','doctor_name','doctor_role','department','department_name','visit_reason','visit_reason_display','notes','payment_done','status','status_display','created_by','created_by_name','created_at','updated_at',
 		]
 		read_only_fields=['id','token_number','date','created_at','updated_at','created_by']
 	
@@ -32,7 +33,7 @@ class OPTicketSerializer(serializers.ModelSerializer):
 		return obj.assigned_doctor.get_role_display() if obj.assigned_doctor else None
 	
 	def get_department_name(self,obj):
-	    return obj.department_name if obj.department else None
+	    return obj.department.name if obj.department else None
 	
 	def get_created_by_name(self,obj):
 		return obj.created_by.full_name if obj.created_by else None

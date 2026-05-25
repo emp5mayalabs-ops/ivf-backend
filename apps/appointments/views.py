@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from rest_framework.parsers import JSONParser,FormParser,MultiPartParser
 from django.utils import timezone
 from django.shortcuts import get_object_or_404
+from rest_framework.views import APIView
 
 from .models import OPTicket
 from .serializer import OPTicketSerializer,PatientBasicSerializer,DoctorChoiceSerializer
@@ -41,8 +42,29 @@ class ReceptionistPatientViewSet(viewsets.ModelViewSet):
 			'patient_id':patient.patient_id,
 			'count':tickets.count(),
 			'tickets':serializer.data,
-        })				
-    
+        })
+	@action(detail=True,methods=['get'],url_path='history')
+	def history(self,request,pk=None):
+		patient=self.get_object()
+		tickets=OPTicket.objects.filter(patient=patient).select_related('assigned_doctor','department','created_by').order_by('-date','-token_number')
+		serializer=OPTicketSerializer(tickets,many=True)
+		return Response({
+			'patient':{
+			'id':patient.id,
+			'patient': patient.patient_id,
+			'full_name':patient.user.full_name,
+			'email':patient.user.email,
+			'phone':patient.phone or '',
+			'blood_group':patient.blood_group or '',
+			'address':patient.address or '',
+			'status':patient.status,
+			'registered_on':patient.registered_on.isoformat() if patient.registered_on else '',
+			'assigned_doctor_name':patient.assigned_doctor.full_name if patient.assigned_doctor else '',
+			},
+			'total_tickets':tickets.count(),
+			'tickets':serializer.data,
+		})
+
 class OPTicketViewSet(viewsets.ModelViewSet):
 	permission_classes=[ReceptionistPermission]
 	parser_classes=[JSONParser,FormParser,MultiPartParser]
@@ -103,40 +125,45 @@ class OPTicketViewSet(viewsets.ModelViewSet):
 		depts=Department.objects.filter(is_active=True).values('id','name','code')
 		return Response(list(depts))
 
-class ReceptionistDashboardView(viewsets.ViewSet):
-	permission_classes=[ReceptionistPermission]
-	@action(detail=False,methods=['get'],url_path='')
-	def dashboard(self,request):
-		today=timezone.now().date()
-		patients_today=PatientProfile.objects.filter(date=today)
-		today_tickets=OPTicket.objects.filter(date=today)
-		tickets_today=today_tickets.count()
-		waiting=today_tickets.filter(status='WAITING').count()
-		in_consult=today_tickets.filter(status='IN_CONSULT').count()
-		done=today_tickets.filter(status='DONE').count()
-		cancelled=today_tickets.filter(status='CANCELLED').count()
-		next_token=OPTicket.next_token_for_today()
-		total_patients=PatientProfile.objects.count()
-		recent_patients=PatientProfile.objects.filter(registered_on__date=today).select_related('user').order_by('-registered_on')[:8]
-		recent_list=[
-			{
-				'full_name':p.user.full_name,
-				'patient_id':p.patient_id,
-				'registered_on':p.registered_on.isoformat() if p.registered_on else None,
+
+class ReceptionistDashboardView(APIView):
+    permission_classes = [ReceptionistPermission]
+
+    def get(self, request):
+        today = timezone.now().date()
+        patients_today = PatientProfile.objects.filter(
+            registered_on=today
+        ).count()
+        today_tickets = OPTicket.objects.filter(date=today)
+        tickets_today = today_tickets.count()
+        waiting       = today_tickets.filter(status='WAITING').count()
+        in_consult    = today_tickets.filter(status='IN_CONSULT').count()
+        done          = today_tickets.filter(status='DONE').count()
+        cancelled     = today_tickets.filter(status='CANCELLED').count()
+        next_token    = OPTicket.next_token_for_today()
+        total_patients = PatientProfile.objects.count()
+
+        recent_patients = PatientProfile.objects.filter(registered_on=today).select_related('user').order_by('-registered_on')[:8]
+        recent_list = [
+            {
+                'full_name':     p.user.full_name,
+                'patient_id':    p.patient_id,
+                'registered_on': p.registered_on.isoformat() if p.registered_on else None,
             }
-			for p in recent_patients
+            for p in recent_patients
         ]
-		return Response({
-			'receptionist_name':request.user.full_name,
-			'patients_today':patients_today,
-			'tickets_today':tickets_today,
-			'waiting':waiting,
-			'in_consult':in_consult,
-			'done':done,
-			'cancelled':cancelled,
-			'next_token':next_token,
-			'total_patients':total_patients,
-			'recent_patients':recent_list,
+
+        return Response({
+            'receptionist_name': request.user.full_name,
+            'patients_today':    patients_today,
+            'tickets_today':     tickets_today,
+            'waiting':           waiting,
+            'in_consult':        in_consult,
+            'done':              done,
+            'cancelled':         cancelled,
+            'next_token':        next_token,
+            'total_patients':    total_patients,
+            'recent_patients':   recent_list,
         })
 
 
@@ -150,9 +177,3 @@ class ReceptionistDashboardView(viewsets.ViewSet):
 
 
 
-
-
-
-# def create(self,request,*args,**kwargs):
-#         response=super().create(request,*args,**kwargs)
-#         return response

@@ -34,7 +34,7 @@ class PatientProfileSerializer(serializers.ModelSerializer):
 	class Meta:
 		model=PatientProfile
 		fields=[
-			'id','patient_id','slug','user','assigned_doctor','assigned_doctor_id','phone','date_of_birth','age','gender','gender_display','blood_group','address','emergency_contact_name','emergency_contact_phone','treatment_type','treatment_type_display','status','status_display','partner','partner_info','registered_on','updated_on','notes','is_active'
+			'id','patient_id','slug','user','assigned_doctor','assigned_doctor_id','phone','date_of_birth','age','gender','gender_display','blood_group','address','insurance_policy_number','insurance_details','emergency_contact_name','emergency_contact_phone','treatment_type','treatment_type_display','status','status_display','partner','partner_info','registered_on','updated_on','notes','is_active'
 		]
 		read_only_fields=['id','patient_id','slug','registered_on','updated_on']
 		
@@ -69,8 +69,10 @@ class PatientCreateSerializer(serializers.Serializer):
 	gender=serializers.ChoiceField(choices=['M','F','O'],required=False,allow_blank=True)
 	blood_group=serializers.CharField(required=False, allow_blank=True)
 	address = serializers.CharField(required=False, allow_blank=True)
-	emergency_contact_name=serializers.CharField(required=False,allow_blank=True)
-	emergency_contact_phone=serializers.CharField(required=False,allow_blank=True)
+	insurance_policy_number=serializers.CharField(required=False, allow_blank=True)
+	insurance_details=serializers.CharField(required=False, allow_blank=True)
+	emergency_contact_name=serializers.CharField(required=False, allow_blank=True)
+	emergency_contact_phone=serializers.CharField(required=False, allow_blank=True)
 	treatment_type=serializers.ChoiceField(choices=PatientProfile._meta.get_field('treatment_type').choices, required=False,allow_blank=True,)
 	status = serializers.ChoiceField(PatientProfile._meta.get_field('status').choices,default='PEN',)
 	assigned_doctor_id=serializers.PrimaryKeyRelatedField(

@@ -50,6 +50,8 @@ class PatientProfile(models.Model):
     gender = models.CharField(max_length=1,choices=GENDER_CHOICES,default='O')
     blood_group=models.CharField(max_length=3,choices=BLOOD_GROUP_CHOICES, blank=True)
     address = models.TextField(blank=True)
+    insurance_policy_number=models.CharField(max_length=50,blank=True)
+    insurance_details=models.TextField(blank=True)
     emergency_contact_name= models.CharField(max_length=100,blank=True)
     emergency_contact_phone=models.CharField(max_length=15,blank=True)
 

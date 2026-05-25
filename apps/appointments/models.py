@@ -22,12 +22,14 @@ class OPTicket(models.Model):
 
 	#Auto Incremented token per day
 	token_number=models.PositiveIntegerField()
-	date=models.DateTimeField(default=timezone.now)
+	date=models.DateField(default=timezone.localdate)
 	patient=models.ForeignKey('patients.PatientProfile',on_delete=models.CASCADE,related_name='op_tickets',)
 	assigned_doctor=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.SET_NULL,blank=True,null=True,related_name='op_tickets_as_doctor',limit_choices_to={'role__in':['END','GYN','ANE']},)
 	department=models.ForeignKey('departments.Department',on_delete=models.SET_NULL,null=True,blank=True,related_name='op_tickets',)
-	visit_reason=models.CharField(max_length=20,choices=VISIT_REASONS,default='WAITING')
+	visit_reason=models.CharField(max_length=50,choices=VISIT_REASONS,default='CONSULTATION')
 	status = models.CharField(max_length=20,choices=STATUS_CHOICES,default='WAITING')
+	notes=models.TextField(blank=True)
+	payment_done=models.BooleanField(default=True)
 	created_by=models.ForeignKey(settings.AUTH_USER_MODEL,on_delete=models.SET_NULL,null=True,related_name='op_tickets_created',)
 	created_at=models.DateTimeField(auto_now_add=True)
 	updated_at=models.DateTimeField(auto_now=True)

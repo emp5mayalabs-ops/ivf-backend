@@ -4,10 +4,10 @@ from .views import ReceptionistDashboardView,OPTicketViewSet,ReceptionistPatient
 
 
 router=DefaultRouter()
-router.register(r'dashboard', ReceptionistDashboardView,basename='rec-dashboard')
 router.register(r'tickets', OPTicketViewSet,basename='rec-ticket')
 router.register(r'patients', ReceptionistPatientViewSet,basename='rec-patient')
 
 urlpatterns=[
-    path('',include(router.urls))
+	path('dashboard/',ReceptionistDashboardView.as_view()),
+    path('',include(router.urls)),
 ]
