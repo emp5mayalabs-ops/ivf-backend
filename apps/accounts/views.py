@@ -6,7 +6,7 @@ from django.core.mail import send_mail
 from django.conf import settings
 from rest_framework.parsers import FormParser,MultiPartParser
 from rest_framework.decorators import action
-from rest_framework.renderers import TemplateHTMLRenderer,JSONRenderer
+from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import redirect
@@ -170,32 +170,24 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
     serializer_class=AdminUserCreateSerializer
     permission_classes=[StaffPermission]
     parser_classes = [FormParser, MultiPartParser]
-    # 1. Add Renderers: JSON for the API, Template for the Browser
-    renderer_classes = [JSONRenderer, TemplateHTMLRenderer]
-    template_name = 'staff_list.html'
+    renderer_classes = [JSONRenderer]
 
-    # 2. Add a custom action to show the "Create" page
     @action(detail=False, methods=['get'], url_path='create-staff')
     def onboard(self, request):
-        # This tells DRF to render your html file when someone visits /staff-management/create-staff/
-        return Response({}, template_name='create_user.html')
+        return Response({'message': 'Onboard API'})
 
     def get_queryset(self):
         return User.objects.exclude(role__in=['PAT','DON']).order_by('-date_joined')
     def list(self,request,*args,**kwargs):
-        response=super().list(request,*args,**kwargs)
-        if request.accepted_renderer.format=='html':
-            return Response({'staff_members':response.data},template_name='staff_list.html')
-        return response
+        return super().list(request,*args,**kwargs)
     
     @action(detail=True, methods=['get', 'post'], url_path='edit')
     def edit(self, request, pk=None):
         staff = self.get_object()
 
         if request.method == 'GET':
-            return Response(
-                {'staff': staff},
-                template_name='edit_staff.html')
+            serializer = self.get_serializer(staff)
+            return Response(serializer.data)
         old_role=staff.role
 
         serializer = self.get_serializer(staff,data=request.data,partial=True)
@@ -373,10 +365,8 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
             profile = updated_user.nurse_profile
             profile.is_head_nurse=request.data.get('is_head_nurse') == 'on'
             profile.is_department_head=request.data.get('is_department_head') == 'on'
-            print("DEBUG is_department_head:", profile.is_department_head)
             profile.save()
             profile.refresh_from_db()  # ← add this to confirm it saved
-            print("DEBUG after save:", profile.is_department_head)
             is_hod=request.data.get('is_department_head') == 'on'
             if is_hod:
                 primary=StaffDepartmentAssignment.objects.filter(
@@ -463,8 +453,6 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
             except Department.DoesNotExist:
                 pass
 
-        if request.accepted_renderer.format == 'html':
-            return redirect('staff-list')
         return Response(serializer.data)
 
     
@@ -588,11 +576,6 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
 
     def create(self,request,*args,**kwargs):
         response=super().create(request,*args,**kwargs)
-        role=request.data.get('role')
-        user_email=request.data.get('email')
-        user=User.objects.get(email=user_email)
-        if request.accepted_renderer.format == 'html':
-            return redirect('staff-list')
         return response
 
 
@@ -638,21 +621,18 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
         change_password = request.GET.get('password') == 'true'
         if request.method == 'GET':
             context={
-                'user':user,
-                'is_editing':is_editing,
-                'change_password':change_password
+                'id': user.id,
+                'email': user.email,
+                'full_name': user.full_name,
+                'role': user.role,
                 }
             if user.role=='HRM' :
                 profile,_=HRManagerProfile.objects.get_or_create(user=user)
                 profile.refresh_from_db()
-                context['profile']=user.hr_profile
-            elif user.role=='ADM':
-                profile,_=AdminProfile.objects.get_or_create(user=user)
-                context['profile']=user.admin_profile
-            return Response(context,template_name='my_profile.html')
+                context['managed_depts'] = getattr(profile, 'managed_depts', '')
+            return Response(context)
 
         if request.method == 'POST':
-            # print(f"DEBUG: Data received: {request.data}")
             if 'new_password' in request.data:
                 old_pass=request.data.get('old_password')
                 new_pass=request.data.get('new_password')
@@ -660,41 +640,38 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
                     user.set_password(new_pass)
                     user.save()
                     update_session_auth_hash(request,user)
-                    return redirect('staff-my-profile')
+                    return Response({'message': 'Password updated successfully'})
                 else:
-                    return Response({'user':user,'error':'Incorrect Old Password'},template_name='my_profile.html')
+                    return Response({'error':'Incorrect Old Password'}, status=400)
             if user.role=='HRM':
                 profile=user.hr_profile
                 profile.managed_depts = request.data.get('managed_departments','')
                 profile.contact_number = request.data.get('contact_number','')
                 profile.save()
-                # print(f"DEBUG: Saved to DB. New Depts: {profile.managed_depts}")
                 profile.refresh_from_db()
-            return redirect('staff-my-profile')
+            return Response({'message': 'Profile updated successfully'})
 
-    @action(detail=False,methods=['get','post'],url_path='force-password-change',permission_classes=[IsAuthenticated])
+    @action(detail=False,methods=['post'],url_path='force-password-change',permission_classes=[IsAuthenticated])
     def force_password_change(self,request):
-        next_url=request.GET.get('next')
-        if request.method=='POST':
-            new_password=request.data.get('new_password')
-            confirm_password=request.data.get('confirm_password')
-            if new_password==confirm_password:
-                user=request.user
-                user.set_password(new_password)
-                user.has_changed_password=True
-                user.save()
+        new_password=request.data.get('new_password')
+        confirm_password=request.data.get('confirm_password')
+        if new_password==confirm_password:
+            user=request.user
+            user.set_password(new_password)
+            user.has_changed_password=True
+            user.save()
 
-                update_session_auth_hash(request,user)
-                return redirect(next_url)
-            else:
-                return Response({'error':'Passwords do not match'}, template_name='force_password_change.html')
-        return Response({},template_name='force_password_change.html')
+            update_session_auth_hash(request,user)
+            return Response({'message': 'Password changed successfully'})
+        else:
+            return Response({'error':'Passwords do not match'}, status=400)
     
     @action(detail=True,methods=['get'],url_path='audit-log',url_name='audit-log')
     def audit_log(self,request,pk=None):
         staff=self.get_object()
         logs=staff.login_logs.all()
-        return Response({'staff':staff,'logs':logs},template_name='staff_audit_log.html')
+        log_data = [{'login_time': log.login_time, 'logout_time': log.logout_time, 'ip_address': log.ip_address} for log in logs]
+        return Response({'staff_id': staff.id, 'logs': log_data})
 
     @action(detail=False,methods=['post'],url_path='heartbeat',permission_classes=[IsAuthenticated])
     def heartbeat(self,request):
@@ -736,13 +713,8 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
         stats={'total_today':new_patients.count(),
                'by_gender':new_patients.values('patient_profile__gender').annotate(count=Count('id'))
                }
-        if request.accepted_renderer.format=='html':
-            return Response({
-                'patients':new_patients,
-                'report_date':today,
-                'stats':stats
-            },template_name='reports/registration_daily.html')
-        return Response(AdminUserCreateSerializer(new_patients,many=True).data)
+        data = AdminUserCreateSerializer(new_patients,many=True).data
+        return Response({'patients': data, 'stats': stats, 'report_date': today})
 
     @action(detail=True, methods=['get'], url_path='assignments')
     def assignments(self,request,pk=None):
