@@ -181,16 +181,12 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
     def list(self,request,*args,**kwargs):
         return super().list(request,*args,**kwargs)
     
-    @action(detail=True, methods=['get', 'post'], url_path='edit')
-    def edit(self, request, pk=None):
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', True)
         staff = self.get_object()
-
-        if request.method == 'GET':
-            serializer = self.get_serializer(staff)
-            return Response(serializer.data)
         old_role=staff.role
 
-        serializer = self.get_serializer(staff,data=request.data,partial=True)
+        serializer = self.get_serializer(staff,data=request.data,partial=partial)
         serializer.is_valid(raise_exception=True)
         updated_user=serializer.save()
         new_role=updated_user.role

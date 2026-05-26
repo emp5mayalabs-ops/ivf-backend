@@ -177,7 +177,8 @@ CSRF_TRUSTED_ORIGINS = [
     'http://127.0.0.1:5173',
     'http://127.0.0.1:5173',
     'https://ivf-backend-ki9p.onrender.com',
-    'https://ivf-frontend.vercel.app'
+    'https://ivf-frontend.vercel.app',
+    'https://w8wdjgw6-8000.inc1.devtunnels.ms/',
 ]
 
 
@@ -210,6 +211,7 @@ CORS_ALLOWED_ORIGINS=[
     'http://127.0.0.1:5173',
     "https://ivf-frontend.vercel.app",
     "http://localhost:3000",
+    'https://w8wdjgw6-8000.inc1.devtunnels.ms',
 ]
 CORS_ALLOW_HEADERS = [
     'accept',

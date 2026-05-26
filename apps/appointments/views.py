@@ -32,7 +32,7 @@ class ReceptionistPatientViewSet(viewsets.ModelViewSet):
             )
 		if stat:
 			qs=qs.filter(status=stat)
-		return qs.distinct()
+		return qs.distinct()                     
 	@action(detail=True, methods=['get'], url_path='tickets')
 	def patient_tickets(self,request,pk=None):
 		patient=self.get_object()
