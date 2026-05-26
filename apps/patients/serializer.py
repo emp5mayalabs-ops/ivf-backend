@@ -19,7 +19,7 @@ class PatientProfileSerializer(serializers.ModelSerializer):
 	user=PatientUserSerializer(read_only=True)
 	assigned_doctor=AssignedDoctorSerializer(read_only=True)
 	assigned_doctor_id=serializers.PrimaryKeyRelatedField(
-		queryset=User.objects.filter(role__in=['GYN','REN']),
+		queryset=User.objects.filter(role__in=['GYN','END']),
 		source='assigned_doctor',
 		write_only=True,
 		required=False,
@@ -76,7 +76,7 @@ class PatientCreateSerializer(serializers.Serializer):
 	treatment_type=serializers.ChoiceField(choices=PatientProfile._meta.get_field('treatment_type').choices, required=False,allow_blank=True,)
 	status = serializers.ChoiceField(PatientProfile._meta.get_field('status').choices,default='PEN',)
 	assigned_doctor_id=serializers.PrimaryKeyRelatedField(
-		queryset=User.objects.filter(role__in=['GYN','REN']),
+		queryset=User.objects.filter(role__in=['GYN','END']),
 		required=False, allow_null=True,
 	)
 	notes = serializers.CharField(required=False,allow_blank=True)

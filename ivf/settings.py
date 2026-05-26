@@ -108,7 +108,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'ivf_hims',
         'USER': 'postgres',
-        'PASSWORD': 'postgres',
+        'PASSWORD': '2475',
         'HOST': 'localhost',
         'PORT': '5432',
     }
@@ -176,8 +176,8 @@ CSRF_COOKIE_HTTPONLY = False            # React must be able to read this
 CSRF_TRUSTED_ORIGINS = [
     'http://127.0.0.1:5173',
     'http://127.0.0.1:5173',
-    'https://ivf-backend-ki9p.onrender.com',
-    'https://ivf-frontend.vercel.app'
+    # 'https://ivf-backend-ki9p.onrender.com',
+    # 'https://ivf-frontend.vercel.app'
 ]
 
 

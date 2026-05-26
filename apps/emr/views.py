@@ -106,7 +106,7 @@ class PatientEMRViewset(viewsets.ViewSet):
 			return Response(EMRRecordDetailSerializer(record,context={'request':request}).data, status=status.HTTP_201_CREATED,)
 		return Response(serializer.errors,status=status.HTTP_400_BAD_REQUEST)
 	
-	@action(detail=False, methods=['get'],url_path='patient/(?P<patient_day>[^/.]+)/records/(?P<record_id>[^/.]+)')
+	@action(detail=False, methods=['get'],url_path='patient/(?P<patient_id>[^/.]+)/records/(?P<record_id>[^/.]+)')
 	def record_detail(self,request,patient_id=None,record_id=None):
 		patient=self.get_patient(patient_id)
 		record=get_object_or_404(EMRRecord,id=record_id,patient=patient)
