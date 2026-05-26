@@ -63,7 +63,7 @@ class PatientProfile(models.Model):
         on_delete=models.SET_NULL,
         null=True,blank=True, 
         related_name='assigned_patients', 
-        limit_choices_to={'role__in':['GYN','REN']},
+        limit_choices_to={'role__in':['GYN','END']},
         )
     
     #Couple Linkage

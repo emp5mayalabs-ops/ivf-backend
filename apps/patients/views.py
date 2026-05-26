@@ -166,7 +166,7 @@ class PatientViewSet(viewsets.ModelViewSet):
 	@action(detail=False,methods=['get'],url_path='doctors')
 	def doctors(self,request):
 		#available doctors list
-		doctors=User.objects.filter(role__in=['GYN','REN'],is_active=True)
+		doctors=User.objects.filter(role__in=['GYN','END'],is_active=True)
 		return Response([
 			{'id':d.id , 'full_name':d.full_name, 'role':d.get_role_display()}
 			for d in doctors
