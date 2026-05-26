@@ -64,6 +64,7 @@ INSTALLED_APPS = [
     'pharmacy',
     'reporting',
     'telehealth',
+    
 ]
 
 MIDDLEWARE = [
@@ -84,7 +85,7 @@ ROOT_URLCONF = 'ivf.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [os.path.join(BASE_DIR, 'templates')],
+        'DIRS': [],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -107,7 +108,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'ivf_hims',
         'USER': 'postgres',
-        'PASSWORD': '2475',
+        'PASSWORD': 'postgres',
         'HOST': 'localhost',
         'PORT': '5432',
     }
@@ -119,9 +120,9 @@ DATABASES = {
 #     }
 # }
 
-db_from_env = dj_database_url.config(conn_max_age=600)
-if db_from_env:
-    DATABASES['default'].update(db_from_env)
+# db_from_env = dj_database_url.config(conn_max_age=600)
+# if db_from_env:
+#     DATABASES['default'].update(db_from_env)
 
 
 # Password validation
