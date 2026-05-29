@@ -7,7 +7,7 @@ from .models import EMRRecord,ROLE_ALLOWED_RECORD_TYPES,ConsultationNote,Diagnos
 class ConsultationNoteSerializer(serializers.ModelSerializer):
 	class Meta:
 		model=ConsultationNote
-		fields=['id','chief_complaint','history','examination','assesment','plan']
+		fields=['id','chief_complaint','history','examination','assessment','plan']
 
 class DiagnosisSerializer(serializers.ModelSerializer):
 	class Meta:
@@ -201,3 +201,9 @@ class MedicalHistoryDocumentSerializer(serializers.ModelSerializer):
 		validated_data['uploaded_by'] = request.user if request else None
 		return super().create(validated_data)
 
+class EMRRecordUpdateSerializer(serializers.ModelSerializer):
+	class Meta:
+		model=EMRRecord
+		fields=['title','date','notes']
+	def validate_record_type(self,value):
+		raise serializers.ValidationError("Record type cannot be changed after creation")

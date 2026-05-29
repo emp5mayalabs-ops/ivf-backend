@@ -14,4 +14,4 @@ class StaffPermission(BasePermission):
         if view.action in ["list","create","onboard","dashboard","my_profile",'hr_permissions','toggle_status','rec_permissions','audit-log']:
             return request.user.role == "HRM"
         
-        return False
+        return False                
