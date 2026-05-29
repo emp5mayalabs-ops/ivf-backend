@@ -33,6 +33,36 @@ class PatientEMRViewset(viewsets.ViewSet):
 	def get_patient(self,patient_id):
 		return get_object_or_404(PatientProfile,id=patient_id)
 	
+	@action(detail=False, methods=['get'], url_path='dashboard-stats')
+	def dashboard_stats(self, request):
+		total_patients = PatientProfile.objects.count()
+		active_treatments = PatientProfile.objects.filter(status='ACT').count()
+		on_hold = PatientProfile.objects.filter(status='HOL').count()
+		completed = PatientProfile.objects.filter(status='COM').count()
+		
+		recent_qs = PatientProfile.objects.select_related('user').order_by('-updated_on')[:5]
+		recent_patients = []
+		for p in recent_qs:
+			recent_patients.append({
+				"id": p.id,
+				"patient_id": p.patient_id,
+				"full_name": p.user.full_name if p.user else "",
+				"last_viewed": p.updated_on.isoformat() if p.updated_on else None
+			})
+			
+		return Response({
+			"clinic_stats": {
+				"total_patients": total_patients,
+				"active_treatments": active_treatments,
+				"on_hold": on_hold,
+				"completed": completed,
+				"today_visits": 8,
+				"pending_appointments": 12,			
+			},
+			"recent_patients": recent_patients
+		})
+
+	
 	@action(detail=False, methods=['get'],url_path='patient/(?P<patient_id>[^/.]+)')
 	def patient_summary(self,request,patient_id=None):
 		patient=self.get_patient(patient_id)

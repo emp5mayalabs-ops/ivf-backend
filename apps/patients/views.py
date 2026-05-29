@@ -14,7 +14,7 @@ from accounts.models import User
 class PatientViewSet(viewsets.ModelViewSet):
 	parser_classes = [JSONParser, FormParser, MultiPartParser]
 	queryset=PatientProfile.objects.select_related('user','assigned_doctor').all()
-	permission_classes=[IsAuthenticated]
+	ermission_classes=[IsAuthenticated]
 
 	def get_serializer_class(self):
 		if self.action == 'create':
