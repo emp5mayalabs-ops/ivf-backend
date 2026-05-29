@@ -181,12 +181,16 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
     def list(self,request,*args,**kwargs):
         return super().list(request,*args,**kwargs)
     
-    def update(self, request, *args, **kwargs):
-        partial = kwargs.pop('partial', True)
+    @action(detail=True, methods=['get', 'post'], url_path='edit')
+    def edit(self, request, pk=None):
         staff = self.get_object()
+
+        if request.method == 'GET':
+            serializer = self.get_serializer(staff)
+            return Response(serializer.data)
         old_role=staff.role
 
-        serializer = self.get_serializer(staff,data=request.data,partial=partial)
+        serializer = self.get_serializer(staff,data=request.data,partial=True)
         serializer.is_valid(raise_exception=True)
         updated_user=serializer.save()
         new_role=updated_user.role
@@ -461,7 +465,20 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
         staff.save()
         return Response({'is_active':staff.is_active})
 
-    
+    def assign_department_head(self,user,is_hod):
+        if is_hod:
+            primary = StaffDepartmentAssignment.objects.filter(
+                user=user,
+                role_in_dept='PRIMARY',
+                is_active=True
+            ).select_related('department').first()
+
+            if primary:
+                primary.department.head = user
+                primary.department.save()
+        else:
+            Department.objects.filter(head=user).update(head=None)  
+      
     def perform_create(self, serializer):
         new_user=serializer.save()
         auto_assign_primary(new_user)
@@ -516,7 +533,7 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
 
         elif new_user.role=='ANE':
             profile,_=AnesthesiologistProfile.objects.get_or_create(user=new_user)
-            profile.edit_anesthesia_records=is_checked('edit_anesthesia_records')
+            profile.can_edit_anesthesia_records=is_checked('can_edit_anesthesia_records')
             profile.is_department_head=is_checked('is_department_head')
             profile.save()
         
@@ -550,7 +567,9 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
             profile.can_perform_cryo=is_checked('can_perform_cryo')
             profile.is_department_head=is_checked('is_department_head')
             profile.save()
-
+    
+        is_hod = is_checked('is_department_head')
+        self.assign_department_head(new_user, is_hod)
 
         staff_roles=['REC','CCO','FCO','END','GYN','EMB','ANE','NUR','PHA','TEC','AND','HRM','ADM']
         if new_user.role in staff_roles:

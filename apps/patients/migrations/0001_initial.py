@@ -36,7 +36,7 @@ class Migration(migrations.Migration):
                 ('updated_on', models.DateTimeField(auto_now=True)),
                 ('notes', models.TextField(blank=True)),
                 ('is_active', models.BooleanField(default=True)),
-                ('assigned_doctor', models.ForeignKey(blank=True, limit_choices_to={'role__in': ['GYN', 'REN']}, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='assigned_patients', to=settings.AUTH_USER_MODEL)),
+                ('assigned_doctor', models.ForeignKey(blank=True, limit_choices_to={'role__in': ['GYN', 'END']}, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='assigned_patients', to=settings.AUTH_USER_MODEL)),
                 ('partner', models.OneToOneField(blank=True, null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='partner_of', to='patients.patientprofile')),
                 ('user', models.OneToOneField(on_delete=django.db.models.deletion.CASCADE, related_name='patient_profile', to=settings.AUTH_USER_MODEL)),
             ],

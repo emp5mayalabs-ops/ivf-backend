@@ -47,7 +47,7 @@ class GynaecologistProfileSerializer(serializers.ModelSerializer):
 class AnesthesiologistProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=AnesthesiologistProfile
-        fields=['edit_anesthesia_records','is_department_head']
+        fields=['can_edit_anesthesia_records','is_department_head']
 
 class EmbryologistProfileSerializer(serializers.ModelSerializer):
     class Meta:

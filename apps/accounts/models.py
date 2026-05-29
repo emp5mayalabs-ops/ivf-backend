@@ -144,7 +144,7 @@ class FinancialCounsellorProfile(models.Model):
 
     is_active=models.BooleanField(default=True)
     # last_audit_performed=models.DateField(null=True,blank=True)
-    def save(self,request,*args,**kwargs):
+    def save(self,*args,**kwargs):
         if not self.employee_id:
             last_profile=FinancialCounsellorProfile.objects.order_by('-id').first()
             if not last_profile:
@@ -171,7 +171,7 @@ class AnesthesiologistProfile(models.Model):
     emergency_contact_info=models.TextField(blank=True,null=True)
 
     #capability
-    edit_anesthesia_records=models.BooleanField(default=False)
+    can_edit_anesthesia_records=models.BooleanField(default=False)
     is_department_head=models.BooleanField(default=False)
 
     is_active=models.BooleanField(default=True)

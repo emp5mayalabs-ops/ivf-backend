@@ -160,16 +160,16 @@ REST_FRAMEWORK = {
 SESSION_COOKIE_AGE = 60 * 60 * 8       # 8-hour session
 SESSION_COOKIE_HTTPONLY = True          # JS cannot read sessionid
 # Session & CSRF cookies must work cross-domain
-# if DEBUG:
-CSRF_COOKIE_SECURE = False
-SESSION_COOKIE_SECURE = False
-CSRF_COOKIE_SAMESITE = "Lax"
-SESSION_COOKIE_SAMESITE = "Lax"
+# # if DEBUG:
+# CSRF_COOKIE_SECURE = False
+# SESSION_COOKIE_SECURE = False
+# CSRF_COOKIE_SAMESITE = "Lax"
+# SESSION_COOKIE_SAMESITE = "Lax"
 # else:
-#     CSRF_COOKIE_SECURE = True
-#     SESSION_COOKIE_SECURE = True
-#     CSRF_COOKIE_SAMESITE = "None"
-#     SESSION_COOKIE_SAMESITE = "None"
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = "None"
+SESSION_COOKIE_SAMESITE = "None"
 
 # 5. CSRF settings
 CSRF_COOKIE_HTTPONLY = False            # React must be able to read this
@@ -178,7 +178,10 @@ CSRF_TRUSTED_ORIGINS = [
     'http://127.0.0.1:5173',
     'https://ivf-backend-ki9p.onrender.com',
     'https://ivf-frontend.vercel.app',
-    'https://w8wdjgw6-8000.inc1.devtunnels.ms/',
+    'https://w8wdjgw6-8000.inc1.devtunnels.ms/'
+    # 'https://ivf-backend-ki9p.onrender.com',
+    'https://ivf-frontend.vercel.app'
+
 ]
 
 

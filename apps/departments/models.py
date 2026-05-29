@@ -25,7 +25,7 @@ ROLE_DEFAULT_DEPARTMENT={
 	'REC': 'REC',
     'CCO': 'CCO',
     'FCO': 'FCO',
-    'REN': 'REN',
+    'END': 'END',
     'GYN': 'GYN',
     'ANE': 'ANE',
     'EMB': 'EMB',
