@@ -181,263 +181,119 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
     def list(self,request,*args,**kwargs):
         return super().list(request,*args,**kwargs)
     
-    @action(detail=True, methods=['get', 'post'], url_path='edit')
-    def edit(self, request, pk=None):
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', True)
         staff = self.get_object()
 
-        if request.method == 'GET':
-            serializer = self.get_serializer(staff)
-            return Response(serializer.data)
-        old_role=staff.role
-
-        serializer = self.get_serializer(staff,data=request.data,partial=True)
+        old_role = staff.role
+        serializer = self.get_serializer(staff, data=request.data, partial=partial)
         serializer.is_valid(raise_exception=True)
-        updated_user=serializer.save()
-        new_role=updated_user.role
-        #to delete the profile and make new profile with updated user role
-        if old_role!=new_role:
-            handle_role_change(updated_user,old_role,new_role)
+        updated_user = serializer.save()
+        new_role = updated_user.role
+
+        if old_role != new_role:
+            handle_role_change(updated_user, old_role, new_role)
             auto_assign_primary(updated_user)
 
         StaffDepartmentAssignment.objects.filter(
             user=updated_user,
-            role_in_dept__in=['SECONDARY','TEMPORARY'],
+            role_in_dept__in=['SECONDARY', 'TEMPORARY'],
             is_active=True,
-            ).update(is_active=False)
-        
+        ).update(is_active=False)
+
+        # ── Role-specific permissions ──────────────────────────────────
+        def get_bool(field): return request.data.get(field) == 'on'
+
         if updated_user.role == 'HRM' and hasattr(updated_user, 'hr_profile'):
-            profile = updated_user.hr_profile
-            profile.can_approve_leaves    = request.data.get('can_approve_leaves') == 'on'
-            profile.can_view_salaries     = request.data.get('can_view_salaries') == 'on'
-            profile.can_terminate_staff   = request.data.get('can_terminate_staff') == 'on'
-            profile.can_edit_attendance   = request.data.get('can_edit_attendance') == 'on'
-            profile.can_generate_payslips = request.data.get('can_generate_payslips') == 'on'
-            profile.can_update_documents  = request.data.get('can_update_documents') == 'on'
-            profile.is_department_head    = request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
-        
-        if  updated_user.role == 'REC' and hasattr(updated_user,'receptionist_profile'):
-            profile = updated_user.receptionist_profile
-            profile.can_register_patient=request.data.get('can_register_patient') == 'on'
-            profile.can_access_billing=request.data.get('can_access_billing') == 'on'
-            profile.can_modify_patient_records=request.data.get('can_modify_patient_records') == 'on'
-            profile.can_schedule_appointment=request.data.get('can_schedule_appointment') == 'on'
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
+            p = updated_user.hr_profile
+            p.can_approve_leaves    = get_bool('can_approve_leaves')
+            p.can_view_salaries     = get_bool('can_view_salaries')
+            p.can_terminate_staff   = get_bool('can_terminate_staff')
+            p.can_edit_attendance   = get_bool('can_edit_attendance')
+            p.can_generate_payslips = get_bool('can_generate_payslips')
+            p.can_update_documents  = get_bool('can_update_documents')
+            p.is_department_head    = get_bool('is_department_head')
+            p.save()
 
-        if updated_user.role == 'CCO' and hasattr(updated_user, 'clinical_counsellor_profile'):
-            profile = updated_user.clinical_counsellor_profile
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
-            
-        if updated_user.role == 'FCO' and hasattr(updated_user, 'financial_counsellor_profile'):
-            profile = updated_user.financial_counsellor_profile
-            profile.can_approve_discounts=request.data.get('can_approve_discounts') == 'on'
-            profile.can_override_insurance=request.data.get('can_override_insurance') == 'on'
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
+        elif updated_user.role == 'REC' and hasattr(updated_user, 'receptionist_profile'):
+            p = updated_user.receptionist_profile
+            p.can_register_patient      = get_bool('can_register_patient')
+            p.can_access_billing        = get_bool('can_access_billing')
+            p.can_modify_patient_records= get_bool('can_modify_patient_records')
+            p.can_schedule_appointment  = get_bool('can_schedule_appointment')
+            p.is_department_head        = get_bool('is_department_head')
+            p.save()
 
-        if updated_user.role == 'END' and hasattr(updated_user, 'endocrinologist_profile'):
-            profile = updated_user.endocrinologist_profile
-            profile.can_perform_egg_retrieval=request.data.get('can_perform_egg_retrieval') == 'on'
-            profile.can_perform_embryo_transfer=request.data.get('can_perform_embryo_transfer') == 'on'
-            profile.can_design_ivf_protocols=request.data.get('can_design_ivf_protocols') == 'on'
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
+        elif updated_user.role == 'CCO' and hasattr(updated_user, 'clinical_counsellor_profile'):
+            p = updated_user.clinical_counsellor_profile
+            p.is_department_head = get_bool('is_department_head')
+            p.save()
 
-        if updated_user.role == 'GYN' and hasattr(updated_user, 'gynaec_profile'):
-            profile = updated_user.gynaec_profile
-            profile.can_perform_egg_retrieval=request.data.get('can_perform_egg_retrieval') == 'on'
-            profile.can_assist_ivf=request.data.get('can_assist_ivf') == 'on'
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
+        elif updated_user.role == 'FCO' and hasattr(updated_user, 'financial_counsellor_profile'):
+            p = updated_user.financial_counsellor_profile
+            p.can_approve_discounts  = get_bool('can_approve_discounts')
+            p.can_override_insurance = get_bool('can_override_insurance')
+            p.is_department_head     = get_bool('is_department_head')
+            p.save()
 
-        if updated_user.role == 'ANE' and hasattr(updated_user, 'anesth_profile'):
-            profile = updated_user.anesth_profile
-            profile.can_edit_anesthesia_records=request.data.get('can_edit_anesthesia_records') == 'on'
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
+        elif updated_user.role == 'END' and hasattr(updated_user, 'endocrinologist_profile'):
+            p = updated_user.endocrinologist_profile
+            p.can_perform_egg_retrieval   = get_bool('can_perform_egg_retrieval')
+            p.can_perform_embryo_transfer = get_bool('can_perform_embryo_transfer')
+            p.can_design_ivf_protocols    = get_bool('can_design_ivf_protocols')
+            p.is_department_head          = get_bool('is_department_head')
+            p.save()
 
-        if updated_user.role == 'EMB' and hasattr(updated_user, 'embryologist_profile'):
-            profile = updated_user.embryologist_profile
-            profile.can_perform_icsi=request.data.get('can_perform_icsi') == 'on'
-            profile.can_perform_biopsy=request.data.get('can_perform_biopsy') == 'on'
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
+        elif updated_user.role == 'GYN' and hasattr(updated_user, 'gynaec_profile'):
+            p = updated_user.gynaec_profile
+            p.can_perform_egg_retrieval = get_bool('can_perform_egg_retrieval')
+            p.can_assist_ivf            = get_bool('can_assist_ivf')
+            p.is_department_head        = get_bool('is_department_head')
+            p.save()
 
-        if updated_user.role == 'NUR' and hasattr(updated_user, 'nurse_profile'):
-            profile = updated_user.nurse_profile
-            profile.is_head_nurse=request.data.get('is_head_nurse') == 'on'
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            profile.refresh_from_db()  # ← add this to confirm it saved
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
+        elif updated_user.role == 'ANE' and hasattr(updated_user, 'anesth_profile'):
+            p = updated_user.anesth_profile
+            p.can_edit_anesthesia_records = get_bool('can_edit_anesthesia_records')
+            p.is_department_head          = get_bool('is_department_head')
+            p.save()
 
-        if updated_user.role == 'PHA' and hasattr(updated_user, 'pharmacist_profile'):
-            profile = updated_user.pharmacist_profile
-            profile.can_manage_inventory=request.data.get('can_manage_inventory') == 'on'
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
+        elif updated_user.role == 'EMB' and hasattr(updated_user, 'embryologist_profile'):
+            p = updated_user.embryologist_profile
+            p.can_perform_icsi   = get_bool('can_perform_icsi')
+            p.can_perform_biopsy = get_bool('can_perform_biopsy')
+            p.is_department_head = get_bool('is_department_head')
+            p.save()
 
-        if updated_user.role == 'TEC' and hasattr(updated_user, 'technician_profile'):
-            profile = updated_user.technician_profile
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
+        elif updated_user.role == 'NUR' and hasattr(updated_user, 'nurse_profile'):
+            p = updated_user.nurse_profile
+            p.is_head_nurse      = get_bool('is_head_nurse')
+            p.is_department_head = get_bool('is_department_head')
+            p.save()
 
-        if updated_user.role == 'AND' and hasattr(updated_user, 'andrology_technician_profile'):
-            profile = updated_user.andrology_technician_profile
-            profile.can_perform_dna_frag=request.data.get('can_perform_dna_frag') == 'on'
-            profile.can_perform_cryo=request.data.get('can_perform_cryo') == 'on'
-            profile.is_department_head=request.data.get('is_department_head') == 'on'
-            profile.save()
-            is_hod=request.data.get('is_department_head') == 'on'
-            if is_hod:
-                primary=StaffDepartmentAssignment.objects.filter(
-                    user=updated_user,
-                    role_in_dept='PRIMARY',
-                    is_active=True
-                ).select_related('department').first()
-                if primary:
-                    primary.department.head=updated_user
-                    primary.department.save()
-            else:
-                Department.objects.filter(head=updated_user).update(head=None)
+        elif updated_user.role == 'PHA' and hasattr(updated_user, 'pharmacist_profile'):
+            p = updated_user.pharmacist_profile
+            p.can_manage_inventory = get_bool('can_manage_inventory')
+            p.is_department_head   = get_bool('is_department_head')
+            p.save()
 
+        elif updated_user.role == 'TEC' and hasattr(updated_user, 'technician_profile'):
+            p = updated_user.technician_profile
+            p.is_department_head = get_bool('is_department_head')
+            p.save()
 
+        elif updated_user.role == 'AND' and hasattr(updated_user, 'andrology_technician_profile'):
+            p = updated_user.andrology_technician_profile
+            p.can_perform_dna_frag = get_bool('can_perform_dna_frag')
+            p.can_perform_cryo     = get_bool('can_perform_cryo')
+            p.is_department_head   = get_bool('is_department_head')
+            p.save()
+
+        # ── Department head assignment 
+        self.assign_department_head(updated_user, get_bool('is_department_head'))
+
+        # ── Secondary department ──────────────────────────────────────
         secondary_dept_id = request.data.get('secondary_department_id')
-        secondary_unit=request.data.get('secondary_unit','')
-        
+        secondary_unit    = request.data.get('secondary_unit', '')
         if secondary_dept_id:
             try:
                 dept = Department.objects.get(id=int(secondary_dept_id))
@@ -452,9 +308,7 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
                 )
             except Department.DoesNotExist:
                 pass
-
         return Response(serializer.data)
-
     
     @action(detail=True,methods=['post'],url_path='toggle-status')
     def toggle_status(self,request,pk=None):
@@ -474,8 +328,19 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
             ).select_related('department').first()
 
             if primary:
-                primary.department.head = user
-                primary.department.save()
+                dept=primary.department
+                from accounts.models import User as UserModel
+                current_head=dept.head
+                if current_head and current_head!=user:
+                    for attr in ['receptionist_profile','hr_profile','clinical_counsellor_profile','financial_counsellor_profile','endocrinologist_profile','gynaec_profile','anesth_profile','embryologist_profile','nurse_profile','pharmacist_profile','technician_profile','andrology_technician_profile']:
+                        if hasattr(current_head, attr):
+                            profile=getattr(current_head,attr)
+                            if hasattr(profile,'is_department_head'):
+                                profile.is_department_head=False
+                                profile.save()
+                                break
+                dept.head=user
+                dept.save()
         else:
             Department.objects.filter(head=user).update(head=None)  
       

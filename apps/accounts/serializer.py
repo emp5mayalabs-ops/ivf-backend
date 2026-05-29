@@ -22,66 +22,91 @@ class ReceptionistProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model= ReceptionistProfile
         fields=[
-            'can_register_patient','can_access_billing','can_modify_patient_records','can_schedule_appointment','is_department_head'
+            'employee_id','desk_location','contact_number','can_register_patient','can_access_billing','can_modify_patient_records','can_schedule_appointment','is_department_head'
         ]
+        read_only_fields=['employee_id']
+
 class ClinicalCounsellorProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=ClinicalCounsellorProfile
-        fields=['is_department_head']
+        fields=['employee_id','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class FinancialCounsellorProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=FinancialCounsellorProfile
-        fields=['can_approve_discounts','can_override_insurance','is_department_head']
+        fields=['employee_id','can_approve_discounts','can_override_insurance','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class ReproductiveEndocrinologistProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=ReproductiveEndocrinologistProfile
-        fields=['can_perform_egg_retrieval','can_perform_embryo_transfer','can_design_ivf_protocols','is_department_head']
+        fields=['employee_id','can_perform_egg_retrieval','can_perform_embryo_transfer','can_design_ivf_protocols','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class GynaecologistProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=GynaecologistProfile
-        fields=['can_perform_egg_retrieval','can_assist_ivf','is_department_head']
+        fields=['employee_id','can_perform_egg_retrieval','can_assist_ivf','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class AnesthesiologistProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=AnesthesiologistProfile
-        fields=['can_edit_anesthesia_records','is_department_head']
+        fields=['employee_id','can_edit_anesthesia_records','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class EmbryologistProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=EmbryologistProfile
-        fields=['can_perform_icsi','is_department_head']
+        fields=['employee_id','can_perform_icsi','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class NurseProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=NurseProfile
-        fields=['is_head_nurse','is_department_head']
+        fields=['employee_id','is_head_nurse','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class PharmacistProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=PharmacistProfile
-        fields=['can_manage_inventory','is_department_head']
+        fields=['employee_id','can_manage_inventory','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class LabTechnicianProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=LabTechnicianProfile
-        fields=['is_department_head']
+        fields=['employee_id','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class AndrologyLabTechnicianSerializer(serializers.ModelSerializer):
     class Meta:
         model=AndrologyLabTechnician
-        fields=['can_perform_dna_frag','can_perform_cryo','is_department_head']
+        fields=['employee_id','can_perform_dna_frag','can_perform_cryo','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class HRManagerProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model=HRManagerProfile
-        fields=['can_approve_leaves','can_view_salaries','can_terminate_staff','can_edit_attendance','can_generate_payslips','can_update_documents','is_department_head']
+        fields=['employee_id','can_approve_leaves','can_view_salaries','can_terminate_staff','can_edit_attendance','can_generate_payslips','can_update_documents','is_department_head']
+        read_only_fields=['employee_id']
+
 
 class AdminUserCreateSerializer(serializers.ModelSerializer):
     secondary_department_id=serializers.IntegerField(write_only=True,required=False,allow_null=True)
     department_info=serializers.SerializerMethodField(read_only=True)
+    employee_id = serializers.SerializerMethodField(read_only=True)
     #nested profile fields
     receptionist_profile=ReceptionistProfileSerializer(read_only=True)
     clinical_counsellor_profile=ClinicalCounsellorProfileSerializer(read_only=True)
@@ -98,7 +123,7 @@ class AdminUserCreateSerializer(serializers.ModelSerializer):
 
     class Meta:
         model=User
-        fields = ['id','email','full_name','role','password','is_active','date_joined','secondary_department_id','department_info',
+        fields = ['id','email','full_name','role','password','is_active','date_joined','secondary_department_id','department_info','employee_id',
         #nested_profiles
         'receptionist_profile','clinical_counsellor_profile','financial_counsellor_profile','endocrinologist_profile','gynaec_profile','anesth_profile','embryologist_profile','nurse_profile','pharmacist_profile','technician_profile','andrology_technician_profile','hr_profile',
         ]
@@ -114,6 +139,28 @@ class AdminUserCreateSerializer(serializers.ModelSerializer):
             }
             for a in assignments
         ]
+
+    def get_employee_id(self, obj):
+        profile_map = {
+            'REC': 'receptionist_profile',
+            'CCO': 'clinical_counsellor_profile',
+            'FCO': 'financial_counsellor_profile',
+            'END': 'endocrinologist_profile',
+            'GYN': 'gynaec_profile',
+            'ANE': 'anesth_profile',
+            'EMB': 'embryologist_profile',
+            'NUR': 'nurse_profile',
+            'AND': 'andrology_technician_profile',
+            'TEC': 'technician_profile',
+            'PHA': 'pharmacist_profile',
+            'HRM': 'hr_profile',
+        }
+        profile_attr = profile_map.get(obj.role)
+        if profile_attr:
+            profile = getattr(obj, profile_attr, None)
+            if profile:
+                return profile.employee_id
+        return None
 
     def create(self, validated_data):
         secondary_department_id=validated_data.pop('secondary_department_id',None)
@@ -131,9 +178,28 @@ class AdminUserCreateSerializer(serializers.ModelSerializer):
                 )
             except Exception:
                 pass
-        return user
-                
-        
+
+        profile_map = {
+            'REC': ReceptionistProfile,
+            'CCO': ClinicalCounsellorProfile,
+            'FCO': FinancialCounsellorProfile,
+            'END': ReproductiveEndocrinologistProfile,
+            'GYN': GynaecologistProfile,
+            'ANE': AnesthesiologistProfile,
+            'EMB': EmbryologistProfile,
+            'NUR': NurseProfile,
+            'AND': AndrologyLabTechnician,
+            'TEC': LabTechnicianProfile,
+            'PHA': PharmacistProfile,
+            'HRM': HRManagerProfile,
+            'ADM': AdminProfile,
+        }
+
+        profile_model = profile_map.get(user.role)
+        if profile_model:
+            profile_model.objects.create(user=user)
+        return user    
+
         # if user.role =='REC':
         #     ReceptionistProfile.objects.create(user=user)
         # elif user.role =='CCO':

@@ -10,9 +10,9 @@ class DepartmentSerializer(serializers.ModelSerializer):
 	class Meta:
 		model=Department
 		fields=[
-			'id','name','code','description','head','head_name','head_role','is_active','staff_count','created_at',
+			'id','name','code','description','head','head_name','head_role','is_active','staff_count','created_at','updated_at',
 		]
-		read_only_fields=['id','created_at']
+		read_only_fields=['id','created_at','updated_at']
 	def get_head_name(self,obj):
 		return obj.head.full_name if obj.head else None
 	def get_head_role(self,obj):
@@ -40,10 +40,12 @@ class StaffDepartmentAssignmentSerializer(serializers.ModelSerializer):
 class DepartmentStaffSerializer (serializers.ModelSerializer):
 	role_display =serializers.SerializerMethodField()
 	assignment_type=serializers.SerializerMethodField()
+	employee_id = serializers.SerializerMethodField()
 
 	class Meta:
 		model=User
-		fields= ['id','full_name','email','role','role_display','is_active','date_joined','assignment_type']
+		fields= ['id','full_name','employee_id','email','role','role_display','is_active','date_joined','assignment_type']
+
 	def get_role_display(self,obj):
 		return obj.get_role_display()
 	def get_assignment_type(self,obj):
@@ -52,3 +54,25 @@ class DepartmentStaffSerializer (serializers.ModelSerializer):
 			return None
 		assignment=obj.staff_assignments.filter(department=dept,is_active=True).first()
 		return assignment.role_in_dept if assignment else None
+	def get_employee_id(self, obj):
+		profile_map = {
+        'REC': 'receptionist_profile',
+        'CCO': 'clinical_counsellor_profile',
+        'FCO': 'financial_counsellor_profile',
+        'END': 'endocrinologist_profile',
+        'GYN': 'gynaec_profile',
+        'ANE': 'anesth_profile',
+        'EMB': 'embryologist_profile',
+        'NUR': 'nurse_profile',
+        'AND': 'andrology_technician_profile',
+        'TEC': 'technician_profile',
+        'PHA': 'pharmacist_profile',
+        'HRM': 'hr_profile',
+        'ADM': 'admin_profile',
+    }
+		profile_attr = profile_map.get(obj.role)
+		if profile_attr:
+			profile = getattr(obj, profile_attr, None)
+			if profile:
+				return profile.employee_id
+			return None

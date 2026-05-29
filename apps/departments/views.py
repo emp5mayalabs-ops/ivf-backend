@@ -27,23 +27,47 @@ def auto_assign_primary(user):
         return None  # Dept not seeded yet
 
 
-def get_staff_with_unit(assignments):
-    result = []
-    for a in assignments:
-        user = a.user
-        result.append({
-            'id': user.id,
-            'full_name': user.full_name,
-            'email': user.email,
-            'role': user.role,
-            'role_display': user.get_role_display(),
-            'is_active': user.is_active,
-            'date_joined': user.date_joined.isoformat() if user.date_joined else None,
-            'unit': a.unit or "",
-            'assignment_id': a.id,
-        })
-    return result
+def get_employee_id(user):
+  profile_map = {
+    'REC': 'receptionist_profile',
+    'CCO': 'clinical_counsellor_profile',
+    'FCO': 'financial_counsellor_profile',
+    'END': 'endocrinologist_profile',
+    'GYN': 'gynaec_profile',
+    'ANE': 'anesth_profile',
+    'EMB': 'embryologist_profile',
+    'NUR': 'nurse_profile',
+    'AND': 'andrology_technician_profile',
+    'TEC': 'technician_profile',
+    'PHA': 'pharmacist_profile',
+    'HRM': 'hr_profile',
+    'ADM': 'admin_profile',
+  }
+  profile_attr = profile_map.get(user.role)
+  if profile_attr:
+    profile = getattr(user, profile_attr, None)
+    if profile:
+      return profile.employee_id
+  return None
 
+
+def get_staff_with_unit(assignments):
+  result = []
+  for a in assignments:
+    user = a.user
+    result.append({
+      'id': user.id,
+      'employee_id': get_employee_id(user),
+      'full_name': user.full_name,
+      'email': user.email,
+      'role': user.role,
+      'role_display': user.get_role_display(),
+      'is_active': user.is_active,
+      'date_joined': user.date_joined.isoformat() if user.date_joined else None,
+      'unit': a.unit or "",
+      'assignment_id': a.id,
+    })
+  return result
 
 class DepartmentViewSet(viewsets.ModelViewSet):
     queryset = Department.objects.all()
@@ -215,4 +239,68 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         serializer = DepartmentStaffSerializer(assignments, many=True)
         return Response(serializer.data)
 
-    
+	@action(detail=True,methods=['post'],url_path='set-head')
+	def set_head(self, request, pk=None):
+		dept = self.get_object()
+		staff_id = request.data.get('staff_id')
+    # --- Clear head ---
+		if not staff_id:
+			if dept.head:
+				self._clear_hod_flag(dept.head)
+				dept.head = None
+				dept.save()
+				return Response({'detail': 'Department head removed.'})
+		try:
+			new_head = User.objects.get(id=staff_id)
+		except User.DoesNotExist:
+			return Response({'detail': 'Staff not found.'}, status=status.HTTP_404_NOT_FOUND)
+		is_primary = StaffDepartmentAssignment.objects.filter(
+            user=new_head,
+            department=dept,
+            role_in_dept='PRIMARY',
+            is_active=True
+        ).exists()
+		if not is_primary:
+			return Response(
+            {'detail': 'Staff must be a primary member of this department.'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+		# Clear old head's flag
+		if dept.head and dept.head != new_head:
+			self._clear_hod_flag(dept.head)
+		# Set new head's flag
+		self._set_hod_flag(new_head)
+		dept.head = new_head
+		dept.save()
+		return Response({
+        'detail': 'Department head updated.',
+        'head_id': new_head.id,
+        'head_name': new_head.full_name,
+    })
+	def _clear_hod_flag(self, user):
+		for attr in [
+        'receptionist_profile', 'hr_profile', 'clinical_counsellor_profile',
+        'financial_counsellor_profile', 'endocrinologist_profile', 'gynaec_profile',
+        'anesth_profile', 'embryologist_profile', 'nurse_profile',
+        'pharmacist_profile', 'technician_profile', 'andrology_technician_profile'
+    ]:
+			if hasattr(user, attr):
+				profile = getattr(user, attr)
+				if hasattr(profile, 'is_department_head'):
+					profile.is_department_head = False
+					profile.save()
+					break
+	def _set_hod_flag(self, user):
+		for attr in [
+        'receptionist_profile', 'hr_profile', 'clinical_counsellor_profile',
+        'financial_counsellor_profile', 'endocrinologist_profile', 'gynaec_profile',
+        'anesth_profile', 'embryologist_profile', 'nurse_profile',
+        'pharmacist_profile', 'technician_profile', 'andrology_technician_profile'
+    	]:
+			if hasattr(user, attr):
+				profile = getattr(user, attr)
+				if hasattr(profile, 'is_department_head'):
+					profile.is_department_head = True
+					profile.save()
+					break
+

@@ -10,7 +10,7 @@ from .models import (
 )
 
 from .serializer import (
-	EMRRecordListSerializer,EMRRecordDetailSerializer,EMRRecordCreateSerializer,ConsultationNoteSerializer,DiagnosisSerializer,PrescriptionSerializer,LabResultSerializer,ScanReportSerializer,ProcedureNoteSerializer,TreatmentCycleSerializer,NursingNoteSerializer,PharmacyNoteSerializer,AndrologyNoteSerializer,CounsellingNoteSerializer,MedicalHistoryDocumentSerializer
+	EMRRecordListSerializer,EMRRecordDetailSerializer,EMRRecordCreateSerializer,EMRRecordUpdateSerializer,ConsultationNoteSerializer,DiagnosisSerializer,PrescriptionSerializer,LabResultSerializer,ScanReportSerializer,ProcedureNoteSerializer,TreatmentCycleSerializer,NursingNoteSerializer,PharmacyNoteSerializer,AndrologyNoteSerializer,CounsellingNoteSerializer,MedicalHistoryDocumentSerializer
 )
 from patients.models import PatientProfile
 
@@ -186,3 +186,103 @@ class PatientEMRViewset(viewsets.ViewSet):
 		allowed=ROLE_ALLOWED_RECORD_TYPES.get(request.user.role, [])
 		types=[{'value':code, 'label':label} for code, label in RECORD_TYPE if code in allowed]
 		return Response({'role':request.user.role, 'allowed_types':types})
+	
+	@action(detail=False,methods=['get'],url_path='patient/(?P<patient_id>[^/.]+)/records/(?P<record_id>[^/.]+)/edit')
+	def get_record_for_edit(self,request,patient_id=None,record_id=None):
+
+		patient=self.get_patient(patient_id)
+		record=get_object_or_404(EMRRecord,id=record_id,patient=patient)
+
+		if request.user.role!='ADM' and record.created_by != request.user :
+			return Response({'detail':'Permission Denied'},status=status.HTTP_403_FORBIDDEN)
+		
+		serializer=EMRRecordDetailSerializer(record,context={'request':request})
+		return Response(serializer.data)
+	
+	@action(detail=False,methods=['patch'],url_path='patient/(?P<patient_id>[^/.]+)/records/(?P<record_id>[^/.]+)/update')
+	def update_record(self,request,patient_id=None,record_id=None):
+		patient=self.get_patient(patient_id)
+		record=get_object_or_404(EMRRecord,id=record_id,patient=patient)
+		if request.user.role != 'ADM' and record.created_by != request.user:
+			return Response({'detail': 'Permission denied.'}, status=403)
+		data = request.data
+		# --- Update base record fields ---
+		base_fields = {k: data[k] for k in ['title', 'date', 'notes'] if k in data}
+		if base_fields:
+			base_serializer = EMRRecordUpdateSerializer(record, data=base_fields, partial=True)
+			base_serializer.is_valid(raise_exception=True)
+			base_serializer.save()
+		errors = {}
+		# --- OneToOne sub-sections ---
+		one_to_one_map = {
+      'consultation':     ('consultation_data',    ConsultationNoteSerializer,  ConsultationNote,  'consultation'),
+      'cycle':            ('cycle_data',           TreatmentCycleSerializer,    TreatmentCycle,    'cycle'),
+      'nursing_note':     ('nursing_note_data',    NursingNoteSerializer,       NursingNote,       'nursing_note'),
+      'pharmacy_note':    ('pharmacy_note_data',   PharmacyNoteSerializer,      PharmacyNote,      'pharmacy_note'),
+      'andrology_note':   ('andrology_note_data',  AndrologyNoteSerializer,     AndrologyNote,     'andrology_note'),
+      'counselling_note': ('counselling_note_data',CounsellingNoteSerializer,   CounsellingNote,   'counselling_note'),
+		}
+		
+		for related_name, (data_key, SerializerClass, Model, accessor) in one_to_one_map.items():
+			if data_key not in data:
+				continue
+			section_data = data[data_key]
+			try:
+				instance = getattr(record, accessor)  # exists → update
+				s = SerializerClass(instance, data=section_data, partial=True)
+			except Model.DoesNotExist:
+				instance = None
+				s = SerializerClass(data=section_data)
+			if s.is_valid():
+				if instance:
+					s.save()
+				else:
+					s.save(record=record)
+			else:
+				errors[data_key] = s.errors
+    # --- FK / many sub-sections (replace strategy) ---
+    # For diagnosis, prescriptions, lab_results, scans, procedures:
+    # send the full updated list → old ones are deleted, new ones created.
+    # This is the safest approach for FK sub-sections with no separate IDs on frontend.
+		many_map = {
+      'diagnosis_data':    (DiagnosisSerializer,    Diagnosis,    'diagnosis'),
+      'prescription_data': (PrescriptionSerializer, Prescription, 'prescriptions'),
+      'lab_result_data':   (LabResultSerializer,    LabResult,    'lab_results'),
+      'scan_data':         (ScanReportSerializer,   ScanReport,   'scans'),
+      'procedure_data':    (ProcedureNoteSerializer, ProcedureNote, 'procedures'),
+    }
+		for data_key, (SerializerClass, Model, related_name) in many_map.items():
+			if data_key not in data:
+				continue  # not sent → don't touch it
+			items = data[data_key]  # full replacement list
+			section_errors = []
+			valid_instances = []
+			for item in items:
+				item_id = item.get('id')
+				if item_id:
+					try:
+						instance = Model.objects.get(id=item_id, record=record)
+						s = SerializerClass(instance, data=item, partial=True)
+					except Model.DoesNotExist:
+						section_errors.append({'id': item_id, 'detail': 'Not found.'})
+						continue
+				else:
+					s = SerializerClass(data=item)
+					
+					if s.is_valid():
+						valid_instances.append((s, item_id))
+					else:
+						section_errors.append(s.errors)
+				if section_errors:
+					errors[data_key] = section_errors
+				else:
+					for s, item_id in valid_instances:
+						if item_id:
+							s.save()
+						else:
+							s.save(record=record)
+		if errors:
+			return Response({'detail': 'Partial update errors.', 'errors': errors}, status=400)
+		# Return full updated record
+		record.refresh_from_db()
+		return Response(EMRRecordDetailSerializer(record, context={'request': request}).data)
