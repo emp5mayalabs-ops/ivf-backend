@@ -238,69 +238,68 @@ class DepartmentViewSet(viewsets.ModelViewSet):
         assignments = StaffDepartmentAssignment.objects.filter(department=department).select_related('user').order_by('-assigned_on')
         serializer = DepartmentStaffSerializer(assignments, many=True)
         return Response(serializer.data)
-
-	@action(detail=True,methods=['post'],url_path='set-head')
-	def set_head(self, request, pk=None):
-		dept = self.get_object()
-		staff_id = request.data.get('staff_id')
+    @action(detail=True,methods=['post'],url_path='set-head')
+    def set_head(self, request, pk=None):
+        dept = self.get_object()
+        staff_id = request.data.get('staff_id')
     # --- Clear head ---
-		if not staff_id:
-			if dept.head:
-				self._clear_hod_flag(dept.head)
-				dept.head = None
-				dept.save()
-				return Response({'detail': 'Department head removed.'})
-		try:
-			new_head = User.objects.get(id=staff_id)
-		except User.DoesNotExist:
-			return Response({'detail': 'Staff not found.'}, status=status.HTTP_404_NOT_FOUND)
-		is_primary = StaffDepartmentAssignment.objects.filter(
+        if not staff_id:
+            if dept.head:
+                self._clear_hod_flag(dept.head)
+                dept.head = None
+                dept.save()
+                return Response({'detail': 'Department head removed.'})
+        try:
+            new_head = User.objects.get(id=staff_id)
+        except User.DoesNotExist:
+            return Response({'detail': 'Staff not found.'}, status=status.HTTP_404_NOT_FOUND)
+        is_primary = StaffDepartmentAssignment.objects.filter(
             user=new_head,
             department=dept,
             role_in_dept='PRIMARY',
             is_active=True
         ).exists()
-		if not is_primary:
-			return Response(
+        if not is_primary:
+            return Response(
             {'detail': 'Staff must be a primary member of this department.'},
             status=status.HTTP_400_BAD_REQUEST
         )
-		# Clear old head's flag
-		if dept.head and dept.head != new_head:
-			self._clear_hod_flag(dept.head)
-		# Set new head's flag
-		self._set_hod_flag(new_head)
-		dept.head = new_head
-		dept.save()
-		return Response({
+        # Clear old head's flag
+        if dept.head and dept.head != new_head:
+            self._clear_hod_flag(dept.head)
+        # Set new head's flag
+        self._set_hod_flag(new_head)
+        dept.head = new_head
+        dept.save()
+        return Response({
         'detail': 'Department head updated.',
         'head_id': new_head.id,
         'head_name': new_head.full_name,
     })
-	def _clear_hod_flag(self, user):
-		for attr in [
+    def _clear_hod_flag(self, user):
+        for attr in [
         'receptionist_profile', 'hr_profile', 'clinical_counsellor_profile',
         'financial_counsellor_profile', 'endocrinologist_profile', 'gynaec_profile',
         'anesth_profile', 'embryologist_profile', 'nurse_profile',
         'pharmacist_profile', 'technician_profile', 'andrology_technician_profile'
     ]:
-			if hasattr(user, attr):
-				profile = getattr(user, attr)
-				if hasattr(profile, 'is_department_head'):
-					profile.is_department_head = False
-					profile.save()
-					break
-	def _set_hod_flag(self, user):
-		for attr in [
+            if hasattr(user, attr):
+                profile = getattr(user, attr)
+                if hasattr(profile, 'is_department_head'):
+                    profile.is_department_head = False
+                    profile.save()
+                    break
+    def _set_hod_flag(self, user):
+        for attr in [
         'receptionist_profile', 'hr_profile', 'clinical_counsellor_profile',
         'financial_counsellor_profile', 'endocrinologist_profile', 'gynaec_profile',
         'anesth_profile', 'embryologist_profile', 'nurse_profile',
         'pharmacist_profile', 'technician_profile', 'andrology_technician_profile'
-    	]:
-			if hasattr(user, attr):
-				profile = getattr(user, attr)
-				if hasattr(profile, 'is_department_head'):
-					profile.is_department_head = True
-					profile.save()
-					break
+        ]:
+            if hasattr(user, attr):
+                profile = getattr(user, attr)
+                if hasattr(profile, 'is_department_head'):
+                    profile.is_department_head = True
+                    profile.save()
+                    break
 
