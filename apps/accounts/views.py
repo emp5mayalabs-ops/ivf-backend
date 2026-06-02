@@ -6,7 +6,7 @@ from django.core.mail import send_mail
 from django.conf import settings
 from rest_framework.parsers import FormParser,MultiPartParser
 from rest_framework.decorators import action
-from rest_framework.renderers import JSONRenderer
+from rest_framework.renderers import JSONRenderer, BrowsableAPIRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import redirect
@@ -28,6 +28,7 @@ from patients.models import PatientProfile
 from gynaecology.models import GynaecologistProfile
 from departments.views import auto_assign_primary
 from departments.models import StaffDepartmentAssignment, Department
+from .models import User, LoginAuditLog, ROLES
 
 ROLE_REDIRECTS = {
     'ADM': '/superadmin',
@@ -170,7 +171,7 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
     serializer_class=AdminUserCreateSerializer
     permission_classes=[StaffPermission]
     parser_classes = [FormParser, MultiPartParser]
-    renderer_classes = [JSONRenderer]
+    renderer_classes = [JSONRenderer,BrowsableAPIRenderer]
 
     @action(detail=False, methods=['get'], url_path='create-staff')
     def onboard(self, request):
@@ -462,37 +463,134 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'], url_path='dashboard')
     def dashboard(self, request):
-        staff_count = User.objects.exclude(role__in=['PAT', 'DON']).count()
-        cutoff=timezone.now() -timedelta(minutes=5)
-        patient_today_count=User.objects.filter(role='PAT',date_joined__date=timezone.now().date()).count()
-        raw_logs=(LoginAuditLog.objects
+        from datetime import timedelta
+        from django.utils import timezone
+        from django.db.models import Count
+        from departments.models import Department, StaffDepartmentAssignment
+    
+        # Staff counts
+        staff_queryset = User.objects.exclude(role__in=['PAT', 'DON'])
+    
+        total_staff = staff_queryset.count()
+        active_staff = staff_queryset.filter(is_active=True).count()
+        inactive_staff = staff_queryset.filter(is_active=False).count()
+    
+        # Patient counts
+        total_patients = User.objects.filter(role='PAT').count()
+    
+        patient_today_count = User.objects.filter(
+            role='PAT',
+            date_joined__date=timezone.now().date()
+        ).count()
+    
+        # Department Heads
+        departments_with_heads = Department.objects.filter(
+            head__isnull=False
+        ).select_related('head')
+    
+        hod_details = [
+            {
+                'department_id': dept.id,
+                'department_name': dept.name,
+                'department_code': dept.code,
+                'head_id': dept.head.id,
+                'head_name': dept.head.full_name,
+                'head_email': dept.head.email,
+                'head_role': dept.head.get_role_display(),
+            }
+            for dept in departments_with_heads
+        ]
+    
+        # Online Staff
+        cutoff = timezone.now() - timedelta(minutes=5)
+    
+        raw_logs = (
+            LoginAuditLog.objects
             .filter(
                 is_active_session=True,
                 last_seen__gte=cutoff
-                )
+            )
             .select_related('user')
-            .order_by('user_id','-login_time'))
-        seen={}
+            .order_by('user_id', '-login_time')
+        )
+    
+        seen = {}
         for log in raw_logs:
             if log.user_id not in seen:
                 seen[log.user_id] = log
-
-        active_sessions=[{
-            'user__full_name':log.user.full_name,
-            'user__email':log.user.email,
-            'user__role':log.user.role,
-            'login_time':log.login_time.isoformat() if log.login_time else None,
-        } for log in seen.values()
-        ][:20]
-        new_patients=User.objects.filter(role='PAT',date_joined__date=timezone.now().date()).order_by('-date_joined').values('full_name', 'email', 'date_joined')[:20]
-        
+    
+        active_sessions = [{
+            'user_id': log.user.id,
+            'full_name': log.user.full_name,
+            'email': log.user.email,
+            'role': log.user.get_role_display(),
+            'role_code': log.user.role,
+            'login_time': log.login_time.isoformat() if log.login_time else None,
+            'last_seen': log.last_seen.isoformat() if log.last_seen else None,
+        } for log in seen.values()][:20]
+    
+        # Recent Patients
+        new_patients = User.objects.filter(
+            role='PAT',
+            date_joined__date=timezone.now().date()
+        ).order_by('-date_joined').values(
+            'full_name',
+            'email',
+            'date_joined'
+        )[:20]
+    
+        # Role Distribution
+        role_distribution = []
+    
+        role_counts = (
+            staff_queryset
+            .values('role')
+            .annotate(count=Count('id'))
+            .order_by('-count')
+        )
+    
+        role_map = dict(ROLES)
+    
+        for item in role_counts:
+            role_distribution.append({
+                'role_code': item['role'],
+                'role_display': role_map.get(item['role'], item['role']),
+                'count': item['count'],
+            })
+    
+        # Department-wise Staff Count
+        department_staff_count = (
+            StaffDepartmentAssignment.objects
+            .filter(
+                is_active=True,
+                role_in_dept='PRIMARY'
+            )
+            .values('department__name')
+            .annotate(count=Count('user'))
+            .order_by('-count')
+        )
+    
         return Response({
-                'staff_count': staff_count,
-                'active_count': len(active_sessions),
+            'summary': {
+                'total_staff': total_staff,
+                'active_staff': active_staff,
+                'inactive_staff': inactive_staff,
+                'online_staff': len(active_sessions),
+                'total_patients': total_patients,
                 'patient_today_count': patient_today_count,
-                'active_sessions': active_sessions,
-                'patients': list(new_patients),
-                })
+                'total_hods': len(hod_details),
+            },
+    
+            'department_heads': hod_details,
+    
+            'role_distribution': role_distribution,
+    
+            'active_sessions': active_sessions,
+    
+            'patients': list(new_patients),
+    
+            'top_departments': list(department_staff_count),
+        })
 
     @action(detail=False,methods=['get','post'], url_path='my-profile')
     def my_profile(self,request):

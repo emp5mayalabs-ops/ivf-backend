@@ -207,3 +207,4 @@ class EMRRecordUpdateSerializer(serializers.ModelSerializer):
 		fields=['title','date','notes']
 	def validate_record_type(self,value):
 		raise serializers.ValidationError("Record type cannot be changed after creation")
+

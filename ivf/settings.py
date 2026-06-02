@@ -108,7 +108,7 @@ DATABASES = {
         'ENGINE': 'django.db.backends.postgresql',
         'NAME': 'ivf_hims',
         'USER': 'postgres',
-        'PASSWORD': '2475',
+        'PASSWORD': 'postgres',
         'HOST': 'localhost',
         'PORT': '5432',
     }
@@ -150,10 +150,14 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
-    'DEFAULT_PARSER_CLASSES': [          # ← add this
+    'DEFAULT_PARSER_CLASSES': [
         'rest_framework.parsers.JSONParser',
         'rest_framework.parsers.FormParser',
         'rest_framework.parsers.MultiPartParser',
+    ],
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+        'rest_framework.renderers.BrowsableAPIRenderer',
     ],
 }
 # 4. Session cookie settings
@@ -174,14 +178,13 @@ SESSION_COOKIE_SAMESITE = "None"
 # 5. CSRF settings
 CSRF_COOKIE_HTTPONLY = False            # React must be able to read this
 CSRF_TRUSTED_ORIGINS = [
-    'http://127.0.0.1:5173',
+    'http://localhost:5173',
     'http://127.0.0.1:5173',
     'https://ivf-backend-ki9p.onrender.com',
     'https://ivf-frontend.vercel.app',
     'https://w8wdjgw6-8000.inc1.devtunnels.ms/'
     # 'https://ivf-backend-ki9p.onrender.com',
     'https://ivf-frontend.vercel.app'
-
 ]
 
 
