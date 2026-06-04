@@ -163,13 +163,18 @@ REST_FRAMEWORK = {
 # 4. Session cookie settings
 SESSION_COOKIE_AGE = 60 * 60 * 8       # 8-hour session
 SESSION_COOKIE_HTTPONLY = True          # JS cannot read sessionid
-# Session & CSRF cookies must work cross-domain
-# # if DEBUG:
+
+# Session & CSRF cookie security — must differ between local dev and production.
+# With SESSION_COOKIE_SECURE=True the browser silently drops the cookie on HTTP
+# (localhost), which causes every /api/me/ call to return 403 Forbidden.
+# if DEBUG:
+    # Local development over HTTP
 # CSRF_COOKIE_SECURE = False
 # SESSION_COOKIE_SECURE = False
 # CSRF_COOKIE_SAMESITE = "Lax"
 # SESSION_COOKIE_SAMESITE = "Lax"
 # else:
+# Production over HTTPS
 CSRF_COOKIE_SECURE = True
 SESSION_COOKIE_SECURE = True
 CSRF_COOKIE_SAMESITE = "None"
@@ -182,7 +187,7 @@ CSRF_TRUSTED_ORIGINS = [
     'http://127.0.0.1:5173',
     'https://ivf-backend-ki9p.onrender.com',
     'https://ivf-frontend.vercel.app',
-    'https://w8wdjgw6-8000.inc1.devtunnels.ms/'
+    'https://w8wdjgw6-8000.inc1.devtunnels.ms'
     # 'https://ivf-backend-ki9p.onrender.com',
     'https://ivf-frontend.vercel.app'
 ]
