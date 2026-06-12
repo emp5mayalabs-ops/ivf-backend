@@ -137,6 +137,46 @@ class OPTicketViewSet(viewsets.ModelViewSet):
         ctx['request'] = self.request
         return ctx
     
+    # ========== ADD THIS CREATE METHOD WITH LEAVE CHECK ==========
+    def create(self, request, *args, **kwargs):
+        """Create OP ticket with doctor leave validation"""
+        
+        # Check if assigned doctor is on leave today
+        assigned_doctor_id = request.data.get('assigned_doctor')
+        
+        if assigned_doctor_id:
+            try:
+                from hr.models import LeaveRequest
+                from accounts.models import User
+                
+                doctor = User.objects.get(id=assigned_doctor_id)
+                today = timezone.now().date()
+                
+                # Check if doctor is on approved leave today
+                is_on_leave = LeaveRequest.objects.filter(
+                    employee=doctor,
+                    status='APPROVED',
+                    start_date__lte=today,
+                    end_date__gte=today
+                ).exists()
+                
+                if is_on_leave:
+                    return Response({
+                        'error': f'Dr. {doctor.full_name} is on approved leave today. Please assign another doctor.',
+                        'doctor_id': doctor.id,
+                        'doctor_name': doctor.full_name,
+                        'leave_date': str(today)
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                    
+            except ImportError:
+                # HR module not installed, skip leave check
+                pass
+            except User.DoesNotExist:
+                pass
+        
+        # Call the original create method
+        return super().create(request, *args, **kwargs)
+    
     @action(detail=False, methods=['get'], url_path='today')
     def today(self, request):
         today = timezone.now().date()
@@ -177,8 +217,33 @@ class OPTicketViewSet(viewsets.ModelViewSet):
     
     @action(detail=False, methods=['get'], url_path='departments')
     def departments(self, request):
-        depts = Department.objects.filter(is_active=True).values('id', 'name', 'code')
-        return Response(list(depts))
+        depts = Department.objects.filter(is_active=True)
+        
+        # Add parameter filtering for consultation departments
+        dept_type = request.query_params.get('type', '')
+        
+        if dept_type == 'consultation':
+            consultation_departments = ['Gynaecology', 'Department of Advanced Reproduction', 'Andrology']
+            depts = depts.filter(name__in=consultation_departments)
+        
+        # Optional: Add more filters if needed
+        elif dept_type == 'lab':
+            lab_departments = ['Embryology & IVF Lab', 'Laboratory(General)']
+            depts = depts.filter(name__in=lab_departments)
+        
+        elif dept_type == 'pharmacy':
+            depts = depts.filter(name='Pharmacy')
+        
+        elif dept_type == 'support':
+            support_departments = ['Reception & Front Desk', 'Nursing', 'Clinical Counselling', 'Financial Counselling']
+            depts = depts.filter(name__in=support_departments)
+        
+        elif dept_type == 'admin':
+            admin_departments = ['Administration & Management', 'HR & Payroll']
+            depts = depts.filter(name__in=admin_departments)
+        
+        # Return as list of values
+        return Response(list(depts.values('id', 'name', 'code')))
     
     # ========== QR CODE ENDPOINTS ==========
     @action(detail=True, methods=['get'], url_path='qrcode')
@@ -246,8 +311,6 @@ class OPTicketViewSet(viewsets.ModelViewSet):
             'token_number': ticket.token_number,
             'qr_code': f"data:image/png;base64,{img_base64}"
         })
-
-
 # ========== APPOINTMENT MANAGEMENT APIS ==========
 
 # 1. BOOK APPOINTMENT API
@@ -272,11 +335,35 @@ class BookAppointmentView(APIView):
         serializer = AppointmentSerializer(data=request.data, context={'request': request})
         
         if serializer.is_valid():
-            # Check availability
             doctor = serializer.validated_data.get('doctor')
             appointment_date = serializer.validated_data.get('appointment_date')
             time_slot = serializer.validated_data.get('time_slot')
             
+            # ========== CHECK IF DOCTOR IS ON LEAVE ==========
+            try:
+                from hr.models import LeaveRequest
+                
+                # Check if doctor has approved leave on this date
+                is_on_leave = LeaveRequest.objects.filter(
+                    employee=doctor,
+                    status='APPROVED',
+                    start_date__lte=appointment_date,
+                    end_date__gte=appointment_date
+                ).exists()
+                
+                if is_on_leave:
+                    return Response({
+                        'error': f'Dr. {doctor.full_name} is on approved leave on {appointment_date}. Please select another date or doctor.',
+                        'doctor_id': doctor.id,
+                        'doctor_name': doctor.full_name,
+                        'leave_date': str(appointment_date)
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                    
+            except ImportError:
+                # HR module not installed, skip leave check
+                pass
+            
+            # ========== CHECK TIME SLOT AVAILABILITY ==========
             if doctor and appointment_date and time_slot:
                 available_slots = Appointment.get_available_time_slots(
                     doctor.id,
@@ -287,18 +374,18 @@ class BookAppointmentView(APIView):
                     return Response({
                         'error': f'Time slot {time_slot} is not available',
                         'available_slots': available_slots
-                    }, status=400)
+                    }, status=status.HTTP_400_BAD_REQUEST)
             
+            # ========== CREATE APPOINTMENT ==========
             appointment = serializer.save()
             
             return Response({
                 'success': True,
                 'message': 'Appointment booked successfully',
                 'appointment': AppointmentSerializer(appointment, context={'request': request}).data
-            }, status=201)
+            }, status=status.HTTP_201_CREATED)
         
-        return Response(serializer.errors, status=400)
-
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 # 2. SEARCH APPOINTMENT API
 class SearchAppointmentView(APIView):
@@ -535,9 +622,11 @@ class CancelAppointmentView(APIView):
 
 
 # 5. DOCTOR-WISE APPOINTMENT CALENDAR API
+# apps/appointments/views.py - Update DoctorAppointmentCalendarView
+
 class DoctorAppointmentCalendarView(APIView):
     """
-    Get doctor-wise appointment calendar
+    Get doctor-wise appointment calendar with leaves
     GET /api/receptionist/appointments/calendar/
     GET /api/receptionist/appointments/calendar/?doctor_id=33&start_date=2026-06-01&end_date=2026-06-07
     """
@@ -581,37 +670,78 @@ class DoctorAppointmentCalendarView(APIView):
                 appointment_date__lte=end_date
             ).select_related('patient__user').order_by('appointment_date', 'appointment_time')
             
+            # ========== GET APPROVED LEAVES FOR THIS DOCTOR ==========
+            try:
+                from hr.models import LeaveRequest
+                approved_leaves = LeaveRequest.objects.filter(
+                    employee=doctor,
+                    status='APPROVED',
+                    start_date__lte=end_date,
+                    end_date__gte=start_date
+                )
+            except ImportError:
+                approved_leaves = []
+            
             # Build calendar view
             calendar_view = []
             current_date = start_date
+            
             while current_date <= end_date:
                 day_appointments = appointments.filter(appointment_date=current_date)
+                
+                # Check if this date falls within any approved leave
+                is_leave_date = False
+                leave_info = None
+                for leave in approved_leaves:
+                    if leave.start_date <= current_date <= leave.end_date:
+                        is_leave_date = True
+                        leave_info = {
+                            'id': leave.id,
+                            'leave_type': leave.get_leave_type_display(),
+                            'reason': leave.reason,
+                            'status': leave.status
+                        }
+                        break
                 
                 # Create time slots for this day
                 slots = []
                 for slot in time_slots:
                     appointment_for_slot = day_appointments.filter(time_slot=slot).first()
                     
-                    slots.append({
-                        'time': slot,
-                        'appointment': {
-                            'id': appointment_for_slot.id if appointment_for_slot else None,
-                            'appointment_id': appointment_for_slot.appointment_id if appointment_for_slot else None,
-                            'token': appointment_for_slot.token_number if appointment_for_slot else None,
-                            'patient_name': appointment_for_slot.patient.user.full_name if appointment_for_slot else None,
-                            'patient_mrn': appointment_for_slot.patient.patient_id if appointment_for_slot else None,
-                            'status': appointment_for_slot.status if appointment_for_slot else None,
-                            'status_display': appointment_for_slot.get_status_display() if appointment_for_slot else None,
-                        } if appointment_for_slot else None,
-                        'available': appointment_for_slot is None
-                    })
+                    if is_leave_date:
+                        # Show as leave day (unavailable)
+                        slots.append({
+                            'time': slot,
+                            'appointment': None,
+                            'available': False,
+                            'is_leave': True,
+                            'leave_info': leave_info,
+                            'reason': 'On Approved Leave'
+                        })
+                    else:
+                        slots.append({
+                            'time': slot,
+                            'appointment': {
+                                'id': appointment_for_slot.id if appointment_for_slot else None,
+                                'appointment_id': appointment_for_slot.appointment_id if appointment_for_slot else None,
+                                'token': appointment_for_slot.token_number if appointment_for_slot else None,
+                                'patient_name': appointment_for_slot.patient.user.full_name if appointment_for_slot else None,
+                                'patient_mrn': appointment_for_slot.patient.patient_id if appointment_for_slot else None,
+                                'status': appointment_for_slot.status if appointment_for_slot else None,
+                                'status_display': appointment_for_slot.get_status_display() if appointment_for_slot else None,
+                            } if appointment_for_slot else None,
+                            'available': appointment_for_slot is None,
+                            'is_leave': False
+                        })
                 
                 calendar_view.append({
                     'date': str(current_date),
                     'day_name': current_date.strftime('%A'),
                     'slots': slots,
                     'total_appointments': day_appointments.count(),
-                    'available_slots': len([s for s in slots if s['available']])
+                    'available_slots': len([s for s in slots if s.get('available', False) and not s.get('is_leave', False)]),
+                    'is_leave': is_leave_date,
+                    'leave_info': leave_info
                 })
                 
                 current_date += timedelta(days=1)
@@ -622,7 +752,8 @@ class DoctorAppointmentCalendarView(APIView):
                 'specialization': doctor.get_role_display(),
                 'room_number': getattr(doctor, 'room_number', 'Not assigned'),
                 'calendar_view': calendar_view,
-                'total_appointments': appointments.count()
+                'total_appointments': appointments.count(),
+                'total_leave_days': len(approved_leaves)
             })
         
         return Response({
@@ -1054,9 +1185,459 @@ class RecentPatientsView(APIView):
         })
 
 
-# ========== DASHBOARD VIEW (WITHOUT RECENT PATIENTS) ==========
+
+# ========== DASHBOARD VIEW WITH DATE FILTERS (CORRECTED) ==========
 class ReceptionistDashboardView(APIView):
     permission_classes = [ReceptionistPermission]
+
+    def get(self, request):
+        # ========== GET DATE RANGE FROM QUERY PARAMETERS ==========
+        date_range = request.query_params.get('range', 'daily')  # daily, weekly, monthly, custom
+        start_date_str = request.query_params.get('start_date')
+        end_date_str = request.query_params.get('end_date')
+        
+        today = timezone.now().date()
+        current_time = timezone.now()
+        
+        # Calculate date range based on filter
+        if date_range == 'daily':
+            start_date = today
+            end_date = today
+            range_label = "Today"
+        elif date_range == 'weekly':
+            start_date = today - timedelta(days=today.weekday())
+            end_date = today
+            range_label = "This Week"
+        elif date_range == 'monthly':
+            start_date = today.replace(day=1)
+            end_date = today
+            range_label = "This Month"
+        elif date_range == 'custom' and start_date_str and end_date_str:
+            try:
+                start_date = timezone.datetime.strptime(start_date_str, '%Y-%m-%d').date()
+                end_date = timezone.datetime.strptime(end_date_str, '%Y-%m-%d').date()
+                range_label = f"{start_date_str} to {end_date_str}"
+            except ValueError:
+                start_date = today
+                end_date = today
+                range_label = "Today"
+        else:
+            start_date = today
+            end_date = today
+            range_label = "Today"
+        
+        weekdays = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        
+        # ========== FILTER TICKETS AND APPOINTMENTS BY DATE RANGE ==========
+        filtered_tickets = OPTicket.objects.filter(
+            date__gte=start_date,
+            date__lte=end_date
+        ).select_related('patient__user', 'assigned_doctor', 'department', 'created_by')
+        
+        filtered_appointments = Appointment.objects.filter(
+            appointment_date__gte=start_date,
+            appointment_date__lte=end_date
+        )
+        
+        user = request.user
+        
+        # ========== 1. Receptionist Info ==========
+        receptionist_info = {
+            "id": user.id,
+            "name": user.full_name,
+            "role": "Receptionist",
+            "profile_image": None,
+            "employee_id": f"REC{user.id:04d}",
+            "shift": "Morning (9:00 AM - 5:00 PM)",
+            "join_date": user.date_joined.date().isoformat() if user.date_joined else "2024-01-01"
+        }
+        
+        # ========== 2. Clinic Info ==========
+        clinic_info = {
+            "name": "IVF Speciality Clinic",
+            "location": "Kochi, Kerala",
+            "contact": "+91 484 1234567",
+            "working_hours": "9:00 AM - 6:00 PM",
+            "current_time": current_time.isoformat(),
+            "current_date": f"{weekdays[current_time.weekday()]}, {current_time.strftime('%d %B %Y')}",
+            "date_range": range_label,
+            "start_date": str(start_date),
+            "end_date": str(end_date)
+        }
+        
+        # ========== 3. Stats for Date Range ==========
+        todays_stats = {
+            "patients_registered": PatientProfile.objects.filter(
+                registered_on__gte=start_date,
+                registered_on__lte=end_date
+            ).count(),
+            "tickets_generated": filtered_tickets.count(),
+            "walkin_patients": filtered_appointments.filter(appointment_type='WALK_IN').count(),
+            "appointments_scheduled": filtered_appointments.count(),
+            "appointments_completed": filtered_tickets.filter(status='DONE').count(),
+            "appointments_missed": filtered_appointments.filter(status='NO_SHOW').count(),
+            "appointments_cancelled": filtered_tickets.filter(status='CANCELLED').count(),
+            "revenue_collected": 0.00,
+            "pending_payments": 0.00,
+            "insurance_claims": 0
+        }
+        
+        # ========== 4. Queue Stats ==========
+        if date_range == 'daily':
+            queue_stats = {
+                "total_waiting": filtered_tickets.filter(status='WAITING').count(),
+                "in_consultation": filtered_tickets.filter(status='IN_CONSULT').count(),
+                "completed": filtered_tickets.filter(status='DONE').count(),
+                "cancelled": filtered_tickets.filter(status='CANCELLED').count(),
+                "no_shows": filtered_appointments.filter(status='NO_SHOW').count(),
+                "next_token": OPTicket.next_token_for_today(),
+                "current_serving": self.get_current_serving_token(filtered_tickets),
+                "average_wait_time": self.calculate_average_wait_time(filtered_tickets),
+                "peak_hour": self.get_peak_hour(filtered_tickets),
+                "queue_status": "active" if filtered_tickets.exists() else "inactive"
+            }
+        else:
+            queue_stats = {
+                "total_waiting": 0,
+                "in_consultation": 0,
+                "completed": filtered_tickets.filter(status='DONE').count(),
+                "cancelled": filtered_tickets.filter(status='CANCELLED').count(),
+                "no_shows": filtered_appointments.filter(status='NO_SHOW').count(),
+                "next_token": 0,
+                "current_serving": 0,
+                "average_wait_time": self.calculate_average_wait_time(filtered_tickets),
+                "peak_hour": self.get_peak_hour(filtered_tickets),
+                "queue_status": "historical"
+            }
+        
+        # ========== 5. Patient Metrics ==========
+        patient_metrics = {
+            "total_patients": PatientProfile.objects.count(),
+            "new_patients_in_range": PatientProfile.objects.filter(
+                registered_on__gte=start_date,
+                registered_on__lte=end_date
+            ).count(),
+            "returning_patients": self.get_returning_patients_count_range(start_date, end_date),
+            "active_treatments": PatientProfile.objects.filter(status='ACTIVE').count(),
+            "completed_treatments": PatientProfile.objects.filter(status='COMPLETED').count(),
+            "patient_satisfaction_rate": 4.8,
+            "ratings_count": 258
+        }
+        
+        # ========== 6. Date Range Queue ==========
+        date_range_queue = []
+        for ticket in filtered_tickets.filter(status__in=['WAITING', 'IN_CONSULT', 'DONE']).order_by('-date', 'token_number')[:20]:
+            date_range_queue.append({
+                "token": ticket.token_number,
+                "date": str(ticket.date),
+                "patient": {
+                    "id": ticket.patient.id,
+                    "name": ticket.patient.user.full_name,
+                    "mrn": ticket.patient.patient_id,
+                    "age": self.calculate_age(ticket.patient.date_of_birth),
+                    "gender": ticket.patient.gender,
+                    "contact": ticket.patient.phone or "",
+                },
+                "doctor": {
+                    "id": ticket.assigned_doctor.id if ticket.assigned_doctor else None,
+                    "name": ticket.assigned_doctor.full_name if ticket.assigned_doctor else "Unassigned",
+                } if ticket.assigned_doctor else None,
+                "status": ticket.get_status_display(),
+                "arrival_time": ticket.created_at.strftime("%I:%M %p") if ticket.created_at else "",
+                "wait_time": self.calculate_wait_time(ticket.created_at) if ticket.created_at else 0,
+            })
+        
+        # ========== 7. Date Range Appointments ==========
+        range_appointments = []
+        for apt in filtered_appointments.select_related('patient__user', 'doctor').order_by('appointment_date', 'appointment_time')[:15]:
+            range_appointments.append({
+                "id": apt.id,
+                "date": apt.appointment_date.strftime("%d %b %Y"),
+                "time": apt.appointment_time or "10:00 AM",
+                "patient_name": apt.patient.user.full_name,
+                "patient_mrn": apt.patient.patient_id,
+                "doctor_id": apt.doctor.id if apt.doctor else None,
+                "doctor_name": apt.doctor.full_name if apt.doctor else "Unassigned",
+                "type": apt.visit_reason,
+                "status": apt.status,
+                "contact": apt.patient.phone or "",
+                "email": apt.patient.user.email or ""
+            })
+        
+        # ========== 8. Doctor Status ==========
+        doctors = User.objects.filter(role__in=['END', 'GYN', 'ANE'], is_active=True)
+        doctor_status = []
+        for doctor in doctors:
+            doctor_tickets = filtered_tickets.filter(assigned_doctor=doctor)
+            doctor_status.append({
+                "id": doctor.id,
+                "name": doctor.full_name,
+                "specialization": "IVF Specialist",
+                "room": getattr(doctor, 'room_number', '101'),
+                "status": self.get_doctor_status_range(doctor, filtered_tickets),
+                "status_color": "green",
+                "patients_seen_in_range": doctor_tickets.filter(status='DONE').count(),
+                "total_capacity": 15 * max(1, (end_date - start_date).days + 1),
+                "current_patient": None,
+                "next_patient": None,
+                "queue_size": 0,
+                "on_break": False,
+                "break_until": None
+            })
+        
+        # ========== 9. Room Status ==========
+        if date_range == 'daily':
+            room_status = []
+            for idx, doctor in enumerate(doctors[:5]):
+                current_patient = self.get_current_patient(doctor, filtered_tickets)
+                room_status.append({
+                    "room_no": f"10{idx+1}",
+                    "doctor": doctor.full_name,
+                    "status": "occupied" if current_patient else "available",
+                    "current_patient": current_patient
+                })
+        else:
+            room_status = []
+        
+        # ========== 10. Registered in Range ==========
+        registered_in_range = []
+        for patient in PatientProfile.objects.filter(
+            registered_on__gte=start_date,
+            registered_on__lte=end_date
+        ).select_related('user', 'assigned_doctor')[:10]:
+            registered_in_range.append({
+                "date": patient.registered_on.strftime("%d %b %Y") if patient.registered_on else "",
+                "time": patient.registered_on.strftime("%I:%M %p") if patient.registered_on else "",
+                "patient_name": patient.user.full_name,
+                "mrn": patient.patient_id,
+                "contact": patient.phone or "",
+                "assigned_doctor": patient.assigned_doctor.full_name if patient.assigned_doctor else "Not Assigned",
+                "insurance_verified": False
+            })
+        
+        # ========== 11. Upcoming Appointments ==========
+        next_week = today + timedelta(days=7)
+        upcoming_tickets = OPTicket.objects.filter(
+            date__gte=today,
+            date__lte=next_week,
+            status__in=['WAITING', 'PENDING']
+        ).select_related('patient__user', 'assigned_doctor')[:20]
+        
+        upcoming_appointments = []
+        for ticket in upcoming_tickets:
+            upcoming_appointments.append({
+                "date": ticket.date.isoformat(),
+                "day": weekdays[ticket.date.weekday()],
+                "patient_name": ticket.patient.user.full_name,
+                "patient_mrn": ticket.patient.patient_id,
+                "doctor_name": ticket.assigned_doctor.full_name if ticket.assigned_doctor else "Unassigned",
+                "time": "10:00 AM",
+                "status": ticket.status,
+                "contact": ticket.patient.phone or "",
+                "reminder_sent": False
+            })
+        
+        # ========== 12. Quick Stats ==========
+        quick_stats = {
+            "range_label": range_label,
+            "total_days": (end_date - start_date).days + 1,
+            "total_tickets": filtered_tickets.count(),
+            "total_appointments": filtered_appointments.count(),
+            "total_patients_in_range": PatientProfile.objects.filter(
+                registered_on__gte=start_date,
+                registered_on__lte=end_date
+            ).count(),
+            "avg_daily_tickets": round(filtered_tickets.count() / max(1, (end_date - start_date).days + 1), 1),
+            "avg_wait_time": self.calculate_average_wait_time(filtered_tickets),
+            "peak_hour": self.get_peak_hour(filtered_tickets),
+            "peak_hour_count": self.get_peak_hour_count(filtered_tickets),
+            "cancellation_rate": round((filtered_tickets.filter(status='CANCELLED').count() / max(1, filtered_tickets.count())) * 100, 1),
+            "no_show_rate": round((filtered_appointments.filter(status='NO_SHOW').count() / max(1, filtered_appointments.count())) * 100, 1),
+            "completion_rate": round((filtered_tickets.filter(status='DONE').count() / max(1, filtered_tickets.count())) * 100, 1)
+        }
+        
+        # ========== 13. Charts Data ==========
+        days_list = []
+        tickets_list = []
+        appointments_list = []
+        
+        delta = (end_date - start_date).days
+        if delta <= 7:
+            current = start_date
+            while current <= end_date:
+                days_list.append(current.strftime("%a, %d %b"))
+                tickets_list.append(OPTicket.objects.filter(date=current).count())
+                appointments_list.append(Appointment.objects.filter(appointment_date=current).count())
+                current += timedelta(days=1)
+        else:
+            current = start_date
+            while current <= end_date:
+                week_end = min(current + timedelta(days=6), end_date)
+                week_label = f"{current.strftime('%d %b')} - {week_end.strftime('%d %b')}"
+                days_list.append(week_label)
+                tickets_list.append(OPTicket.objects.filter(date__gte=current, date__lte=week_end).count())
+                appointments_list.append(Appointment.objects.filter(appointment_date__gte=current, appointment_date__lte=week_end).count())
+                current = week_end + timedelta(days=1)
+        
+        hourly_labels = ["9 AM", "10 AM", "11 AM", "12 PM", "1 PM", "2 PM", "3 PM", "4 PM", "5 PM"]
+        hourly_values = []
+        for hour in range(9, 18):
+            count = filtered_tickets.filter(created_at__hour=hour).count()
+            hourly_values.append(count)
+        
+        charts_data = {
+            "patient_flow": {
+                "labels": days_list,
+                "values": tickets_list,
+                "appointment_values": appointments_list
+            },
+            "hourly_distribution": {
+                "labels": hourly_labels,
+                "values": hourly_values
+            },
+            "weekly_trend": {
+                "labels": ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"],
+                "values": [0, 0, 0, 0, 0, 0]
+            },
+            "wait_times": {
+                "labels": hourly_labels[:-1],
+                "values": [0, 0, 0, 0, 0, 0, 0, 0]
+            }
+        }
+        
+        # ========== 14. Notifications ==========
+        notifications = [
+            {
+                "id": 1,
+                "type": "warning",
+                "title": "Insurance Verification Pending",
+                "message": "3 patients require insurance verification",
+                "time": current_time.isoformat(),
+                "read": False,
+                "action_required": True,
+                "action_url": "/insurance/pending"
+            }
+        ]
+        
+        # ========== 15. Billing Summary ==========
+        billing_summary = {
+            "today_collections": 0.00,
+            "pending_payments": 5000.00,
+            "insurance_claims_pending": 3,
+            "insurance_claims_approved": 2,
+            "insurance_claims_rejected": 0,
+            "last_transaction": None
+        }
+        
+        # ========== Final Response ==========
+        return Response({
+            'date_range_info': {
+                'range': date_range,
+                'label': range_label,
+                'start_date': str(start_date),
+                'end_date': str(end_date)
+            },
+            'receptionist_info': receptionist_info,
+            'clinic_info': clinic_info,
+            'todays_stats': todays_stats,
+            'queue_stats': queue_stats,
+            'patient_metrics': patient_metrics,
+            'today_queue': date_range_queue,
+            'today_appointments': range_appointments,
+            'doctor_status': doctor_status,
+            'room_status': room_status,
+            'registered_today': registered_in_range,
+            'upcoming_appointments': upcoming_appointments,
+            'quick_stats': quick_stats,
+            'charts_data': charts_data,
+            'notifications': notifications,
+            'billing_summary': billing_summary
+        })
+    
+    # ========== Helper Methods ==========
+    
+    def calculate_age(self, date_of_birth):
+        if not date_of_birth:
+            return None
+        today = timezone.now().date()
+        return today.year - date_of_birth.year - ((today.month, today.day) < (date_of_birth.month, date_of_birth.day))
+    
+    def calculate_wait_time(self, created_at):
+        if not created_at:
+            return 0
+        delta = timezone.now() - created_at
+        return int(delta.total_seconds() / 60)
+    
+    def calculate_average_wait_time(self, tickets):
+        wait_times = []
+        for ticket in tickets:
+            if ticket.created_at:
+                delta = timezone.now() - ticket.created_at
+                wait_times.append(int(delta.total_seconds() / 60))
+        return round(sum(wait_times) / len(wait_times), 1) if wait_times else 0
+    
+    def get_peak_hour(self, tickets):
+        hour_counts = {}
+        for ticket in tickets:
+            if ticket.created_at:
+                hour = ticket.created_at.hour
+                hour_counts[hour] = hour_counts.get(hour, 0) + 1
+        if hour_counts:
+            peak_hour = max(hour_counts, key=hour_counts.get)
+            return f"{peak_hour % 12 or 12}:00 {'AM' if peak_hour < 12 else 'PM'}"
+        return None
+    
+    def get_peak_hour_count(self, tickets):
+        hour_counts = {}
+        for ticket in tickets:
+            if ticket.created_at:
+                hour = ticket.created_at.hour
+                hour_counts[hour] = hour_counts.get(hour, 0) + 1
+        return max(hour_counts.values()) if hour_counts else 0
+    
+    def get_current_serving_token(self, today_tickets):
+        current = today_tickets.filter(status='IN_CONSULT').first()
+        if current:
+            return current.token_number
+        waiting = today_tickets.filter(status='WAITING').first()
+        if waiting:
+            return waiting.token_number
+        return 0
+    
+    def get_doctor_status(self, doctor, today_tickets):
+        if today_tickets.filter(assigned_doctor=doctor, status='IN_CONSULT').exists():
+            return "in_consultation"
+        if today_tickets.filter(assigned_doctor=doctor, status='WAITING').exists():
+            return "waiting"
+        return "available"
+    
+    def get_doctor_status_range(self, doctor, tickets):
+        if tickets.filter(assigned_doctor=doctor, status='IN_CONSULT').exists():
+            return "in_consultation"
+        if tickets.filter(assigned_doctor=doctor, status='WAITING').exists():
+            return "waiting"
+        return "available"
+    
+    def get_current_patient(self, doctor, today_tickets):
+        current = today_tickets.filter(assigned_doctor=doctor, status='IN_CONSULT').first()
+        if current:
+            return current.patient.user.full_name
+        return None
+    
+    def get_returning_patients_count(self):
+        from django.db.models import Count
+        return PatientProfile.objects.annotate(
+            ticket_count=Count('op_tickets')
+        ).filter(ticket_count__gt=1).count()
+    
+    def get_returning_patients_count_range(self, start_date, end_date):
+        from django.db.models import Count
+        return PatientProfile.objects.filter(
+            op_tickets__date__gte=start_date,
+            op_tickets__date__lte=end_date
+        ).annotate(
+            ticket_count=Count('op_tickets')
+        ).filter(ticket_count__gt=1).distinct().count()
 
     def get(self, request):
         today = timezone.now().date()
