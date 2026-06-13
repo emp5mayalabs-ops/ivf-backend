@@ -14,6 +14,14 @@ from .serializer import (
 )
 from patients.models import PatientProfile
 
+STATUS_MAP = {
+    "pending": "PEN",
+    "active": "ACT",
+    "on_hold": "HOL",
+    "completed": "COM",
+    "cancelled": "CAN",
+}
+
 #Permissions helper
 
 ROLE_WITH_EMR_ACCESS=['REC','CCO','FCO','END','GYN','ANE','EMB','NUR','PHA','TEC','AND','ADM']
@@ -728,3 +736,43 @@ class PatientEMRViewset(viewsets.ViewSet):
 	        ])
     
 	    return response
+
+	@action(detail=False, methods=['get'], url_path='patients')
+	def patients_by_status(self, request):
+	    status_filter = request.query_params.get("status", "all")
+	    qs = PatientProfile.objects.select_related(
+	        "user",
+	        "assigned_doctor"
+	    ).order_by("-updated_on")
+	
+	    if status_filter != "all":
+	        status_code = STATUS_MAP.get(status_filter)
+	        if status_code:
+	            qs = qs.filter(status=status_code)
+	
+	    qs = qs[:20]
+	
+	    patients = [{
+	        "id": p.id,
+	        "patient_id": p.patient_id,
+	        "full_name": p.user.full_name if p.user else "",
+	        "assigned_doctor": (
+	            p.assigned_doctor.full_name
+	            if p.assigned_doctor else None
+	        ),
+	        "doctor_role": (
+	            p.assigned_doctor.get_role_display()
+	            if p.assigned_doctor else None
+	        ),
+	        "status": p.status,
+	        "status_display": p.get_status_display(),
+	        "last_viewed": (
+	            p.updated_on.isoformat()
+	            if p.updated_on else None
+	        ),
+	    } for p in qs]
+	
+	    return Response({
+	        "count": len(patients),
+	        "patients": patients
+	    })
