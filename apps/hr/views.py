@@ -36,6 +36,8 @@ class HRLoginView(APIView):
         return Response(ser.errors, status=400)
 
 
+# apps/hr/views.py - Add this enhanced dashboard view
+
 class HRDashboardView(APIView):
     permission_classes = [IsAuthenticated]
     
@@ -43,14 +45,248 @@ class HRDashboardView(APIView):
         if request.user.role != 'HRM':
             return Response({'error': 'Access denied'}, status=403)
         
+        from accounts.models import ROLES, LoginAuditLog
+        from departments.models import StaffDepartmentAssignment, Department
+        from django.db.models import Count, Q
+        from datetime import timedelta
+        
         all_staff = User.objects.exclude(role__in=['PAT', 'DON'])
+        today = timezone.now().date()
+        last_month = today - timedelta(days=30)
+        last_week = today - timedelta(days=7)
+        
+        # Get role mapping from accounts.models.ROLES
+        role_map = dict(ROLES)
+        
+        # 1. Staff Statistics
+        total_staff = all_staff.count()
+        active_staff = all_staff.filter(is_active=True).count()
+        inactive_staff = all_staff.filter(is_active=False).count()
+        
+        # 2. Staff by Role (using ROLES from accounts)
+        staff_by_role = {}
+        role_counts = all_staff.values('role').annotate(count=Count('id')).order_by('-count')
+        
+        for item in role_counts:
+            role_code = item['role']
+            role_name = role_map.get(role_code, role_code)
+            staff_by_role[role_code] = {
+                'name': role_name,
+                'count': item['count'],
+                'percentage': round((item['count'] / total_staff) * 100, 1) if total_staff > 0 else 0
+            }
+        
+        # 3. Department-wise Staff Distribution
+        department_stats = []
+        departments = Department.objects.filter(is_active=True)
+        
+        for dept in departments:
+            staff_count = StaffDepartmentAssignment.objects.filter(
+                department=dept,
+                is_active=True,
+                user__is_active=True,
+                user__role__in=[r[0] for r in ROLES if r[0] not in ['PAT', 'DON']]
+            ).values('user').distinct().count()
+            
+            if staff_count > 0:
+                department_stats.append({
+                    'id': dept.id,
+                    'name': dept.name,
+                    'code': dept.code,
+                    'staff_count': staff_count,
+                    'percentage': round((staff_count / total_staff) * 100, 1) if total_staff > 0 else 0
+                })
+        
+        # 4. Online/Active Staff (from LoginAuditLog)
+        cutoff = timezone.now() - timedelta(minutes=5)
+        online_staff = LoginAuditLog.objects.filter(
+            is_active_session=True,
+            last_seen__gte=cutoff,
+            user__role__in=[r[0] for r in ROLES if r[0] not in ['PAT', 'DON']]
+        ).values('user').distinct().count()
+        
+        # 5. Leave Statistics
+        pending_leaves = LeaveRequest.objects.filter(status='PENDING').count()
+        
+        # Leaves this month
+        current_month_start = today.replace(day=1)
+        if today.month == 12:
+            next_month = today.replace(year=today.year + 1, month=1, day=1)
+        else:
+            next_month = today.replace(month=today.month + 1, day=1)
+        current_month_end = next_month - timedelta(days=1)
+        
+        leaves_this_month = LeaveRequest.objects.filter(
+            created_at__date__gte=current_month_start,
+            created_at__date__lte=current_month_end
+        )
+        
+        leaves_this_month_count = leaves_this_month.count()
+        approved_leaves_this_month = leaves_this_month.filter(status='APPROVED').count()
+        rejected_leaves_this_month = leaves_this_month.filter(status='REJECTED').count()
+        
+        # 6. Staff Turnover (New joiners in last 30 days)
+        recent_joiners = all_staff.filter(
+            date_joined__date__gte=last_month,
+            date_joined__date__lte=today
+        ).count()
+        
+        # 7. Department Heads
+        department_heads = Department.objects.filter(
+            head__isnull=False,
+            head__is_active=True
+        ).select_related('head').count()
+        
+        # 8. Recent Leave Requests (Last 5 pending)
+        recent_leaves = LeaveRequest.objects.filter(
+            status='PENDING'
+        ).select_related('employee').order_by('-created_at')[:5]
+        
+        recent_leaves_data = []
+        for leave in recent_leaves:
+            recent_leaves_data.append({
+                'id': leave.id,
+                'employee_name': leave.employee.full_name,
+                'employee_id': leave.employee.id,
+                'leave_type': leave.get_leave_type_display(),
+                'start_date': leave.start_date,
+                'end_date': leave.end_date,
+                'days': (leave.end_date - leave.start_date).days + 1 if leave.end_date and leave.start_date else 0,
+                'status': leave.status,
+                'created_at': leave.created_at
+            })
+        
+        # 9. Staff with Most Leaves (Top 5)
+        top_leave_takers = LeaveRequest.objects.filter(
+            status='APPROVED'
+        ).values(
+            'employee__id',
+            'employee__full_name',
+            'employee__email',
+            'employee__role'
+        ).annotate(
+            total_leaves=Count('id')
+        ).order_by('-total_leaves')[:5]
+        
+        top_leave_takers_data = []
+        for item in top_leave_takers:
+            top_leave_takers_data.append({
+                'id': item['employee__id'],
+                'name': item['employee__full_name'],
+                'email': item['employee__email'],
+                'role': role_map.get(item['employee__role'], item['employee__role']),
+                'total_leaves': item['total_leaves']
+            })
+        
+        # 10. Upcoming Birthdays (if date_of_birth field exists)
+        upcoming_birthdays = []
+        # Check if date_of_birth field exists on User model
+        if hasattr(User, 'date_of_birth'):
+            from datetime import date
+            current_month = today.month
+            current_day = today.day
+            
+            # Get birthdays in current and next month
+            staff_with_birthdays = all_staff.filter(
+                date_of_birth__isnull=False,
+                is_active=True
+            )
+            
+            for staff in staff_with_birthdays:
+                bday_month = staff.date_of_birth.month
+                bday_day = staff.date_of_birth.day
+                
+                # Check if birthday is in next 30 days
+                bday_this_year = date(today.year, bday_month, bday_day)
+                if bday_this_year >= today and bday_this_year <= today + timedelta(days=30):
+                    upcoming_birthdays.append({
+                        'name': staff.full_name,
+                        'role': role_map.get(staff.role, staff.role),
+                        'birthday': bday_this_year.strftime('%b %d'),
+                        'days_left': (bday_this_year - today).days
+                    })
+                elif bday_this_year < today:
+                    # Next year's birthday
+                    bday_next_year = date(today.year + 1, bday_month, bday_day)
+                    if bday_next_year <= today + timedelta(days=30):
+                        upcoming_birthdays.append({
+                            'name': staff.full_name,
+                            'role': role_map.get(staff.role, staff.role),
+                            'birthday': bday_next_year.strftime('%b %d'),
+                            'days_left': (bday_next_year - today).days
+                        })
+            
+            # Sort by days left and limit to 5
+            upcoming_birthdays = sorted(upcoming_birthdays, key=lambda x: x['days_left'])[:5]
+        
+        # 11. Gender Distribution (if gender field exists)
+        gender_distribution = []
+        if hasattr(User, 'gender'):
+            gender_counts = all_staff.values('gender').annotate(count=Count('id'))
+            gender_map = {'M': 'Male', 'F': 'Female', 'O': 'Other', None: 'Not Specified'}
+            for item in gender_counts:
+                gender_distribution.append({
+                    'gender': gender_map.get(item['gender'], 'Not Specified'),
+                    'count': item['count'],
+                    'percentage': round((item['count'] / total_staff) * 100, 1) if total_staff > 0 else 0
+                })
+        
+        # 12. Leave Balance Summary (if LeaveBalance model exists)
+        leave_balance_summary = {
+            'total_allocated': 0,
+            'total_used': 0,
+            'total_remaining': 0
+        }
+        
+        # Check if LeaveBalance model exists
+        try:
+            from .models import LeaveBalance
+            leave_balance_summary = {
+                'total_allocated': LeaveBalance.objects.filter(
+                    user__in=all_staff
+                ).aggregate(total=Sum('allocated_leaves'))['total'] or 0,
+                'total_used': LeaveBalance.objects.filter(
+                    user__in=all_staff
+                ).aggregate(total=Sum('used_leaves'))['total'] or 0,
+                'total_remaining': LeaveBalance.objects.filter(
+                    user__in=all_staff
+                ).aggregate(total=Sum('remaining_leaves'))['total'] or 0
+            }
+        except:
+            pass
         
         return Response({
             'success': True,
-            'stats': {
-                'total_staff': all_staff.count(),
-                'active_staff': all_staff.filter(is_active=True).count(),
-                'pending_leaves': LeaveRequest.objects.filter(status='PENDING').count(),
+            'dashboard': {
+                'summary': {
+                    'total_staff': total_staff,
+                    'active_staff': active_staff,
+                    'inactive_staff': inactive_staff,
+                    'online_staff': online_staff,
+                    'pending_leaves': pending_leaves,
+                    'recent_joiners': recent_joiners,
+                    'department_heads': department_heads,
+                },
+                'leave_stats': {
+                    'this_month': {
+                        'total': leaves_this_month_count,
+                        'approved': approved_leaves_this_month,
+                        'rejected': rejected_leaves_this_month,
+                        'pending': leaves_this_month_count - approved_leaves_this_month - rejected_leaves_this_month
+                    },
+                    'approval_rate': round((approved_leaves_this_month / leaves_this_month_count) * 100, 1) if leaves_this_month_count > 0 else 0
+                },
+                'staff_breakdown': {
+                    'by_role': staff_by_role,
+                    'by_department': department_stats,
+                    'by_gender': gender_distribution
+                },
+                'recent_activity': {
+                    'recent_leaves': recent_leaves_data,
+                    'top_leave_takers': top_leave_takers_data
+                },
+                'upcoming_birthdays': upcoming_birthdays,
+                'leave_balance_summary': leave_balance_summary
             }
         })
 
