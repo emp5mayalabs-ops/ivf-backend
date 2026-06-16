@@ -4,13 +4,30 @@ from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.contrib.auth import login
 from django.utils import timezone
-from django.db.models import Q, Count
-from datetime import timedelta
+from django.db.models import Q, Count, Sum
+from datetime import datetime, timedelta
 
-from .models import HRManagerProfile, LeaveRequest
+from .models import (
+    HRManagerProfile, 
+    LeaveRequest,
+    Shift,
+    DoctorShiftAssignment,
+    ShiftSwapRequest,
+    ShiftAttendance,
+    LeaveBalance,
+    Holiday
+)
 from .serializers import (
-    HRLoginSerializer, HRProfileSerializer, 
-    StaffListSerializer, LeaveRequestSerializer
+    HRLoginSerializer,
+    HRProfileSerializer,
+    StaffListSerializer,
+    LeaveRequestSerializer,
+    ShiftSerializer,
+    DoctorShiftAssignmentSerializer,
+    ShiftSwapRequestSerializer,
+    ShiftAttendanceSerializer,
+    LeaveBalanceSerializer,
+    HolidaySerializer
 )
 from accounts.models import User
 
@@ -298,7 +315,19 @@ class StaffManagementView(APIView):
         if request.user.role != 'HRM':
             return Response({'error': 'Access denied'}, status=403)
         
-        staff = User.objects.exclude(role__in=['PAT', 'DON']).order_by('-date_joined')
+        # Get role filter from query params
+        roles = request.query_params.get('role')
+        
+        # Base queryset - exclude patients and donors
+        staff = User.objects.exclude(role__in=['PAT', 'DON'])
+        
+        # Apply role filter if provided
+        if roles:
+            # Split by comma if multiple roles (e.g., "END,GYN,ANE")
+            role_list = [r.strip() for r in roles.split(',')]
+            staff = staff.filter(role__in=role_list)
+        
+        staff = staff.order_by('-date_joined')
         ser = StaffListSerializer(staff, many=True)
         return Response({'success': True, 'staff': ser.data})
     
@@ -328,7 +357,6 @@ class StaffManagementView(APIView):
         
         staff.save()
         return Response({'success': True, 'message': message})
-
 
 class LeaveManagementView(APIView):
     permission_classes = [IsAuthenticated]
@@ -808,3 +836,619 @@ class HRAddStaffView(APIView):
             
         except Exception as e:
             return Response({'error': str(e)}, status=500)
+        
+# ========== SHIFT MANAGEMENT VIEWS ==========
+
+class HRShiftManagementView(APIView):
+    """HR can manage shifts (create, edit, delete shifts)"""
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request, shift_id=None):
+        """Get all shifts or specific shift"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        # If shift_id is provided, get single shift
+        if shift_id:
+            try:
+                shift = Shift.objects.get(id=shift_id)
+                serializer = ShiftSerializer(shift)
+                return Response({'success': True, 'shift': serializer.data})
+            except Shift.DoesNotExist:
+                return Response({'error': 'Shift not found'}, status=404)
+        
+        # Get all active shifts
+        shifts = Shift.objects.filter(is_active=True)
+        serializer = ShiftSerializer(shifts, many=True)
+        return Response({'success': True, 'shifts': serializer.data})
+    
+    def post(self, request):
+        """Create a new shift"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        serializer = ShiftSerializer(data=request.data)
+        if serializer.is_valid():
+            shift = serializer.save()
+            return Response({
+                'success': True,
+                'message': f'Shift "{shift.name}" created successfully',
+                'shift': serializer.data
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def put(self, request, shift_id):
+        """Update an existing shift"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        try:
+            shift = Shift.objects.get(id=shift_id)
+        except Shift.DoesNotExist:
+            return Response({'error': 'Shift not found'}, status=404)
+        
+        serializer = ShiftSerializer(shift, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({
+                'success': True,
+                'message': f'Shift updated successfully',
+                'shift': serializer.data
+            })
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def delete(self, request, shift_id):
+        """Delete a shift (soft delete)"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        try:
+            shift = Shift.objects.get(id=shift_id)
+            shift.is_active = False
+            shift.save()
+            return Response({
+                'success': True,
+                'message': f'Shift "{shift.name}" deactivated'
+            })
+        except Shift.DoesNotExist:
+            return Response({'error': 'Shift not found'}, status=404)
+
+class HRShiftAssignmentView(APIView):
+    """HR can assign doctors to shifts"""
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        """Get shift assignments for a date range"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        # Get query parameters
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        doctor_id = request.query_params.get('doctor_id')
+        
+        if not start_date or not end_date:
+            return Response({
+                'error': 'start_date and end_date are required',
+                'format': 'YYYY-MM-DD'
+            }, status=400)
+        
+        try:
+            start = datetime.strptime(start_date, '%Y-%m-%d').date()
+            end = datetime.strptime(end_date, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'error': 'Invalid date format'}, status=400)
+        
+        # Build query
+        assignments = DoctorShiftAssignment.objects.filter(
+            shift_date__gte=start,
+            shift_date__lte=end,
+            status__in=['SCHEDULED', 'PENDING_SWAP']
+        ).select_related('doctor', 'shift')
+        
+        if doctor_id:
+            assignments = assignments.filter(doctor_id=doctor_id)
+        
+        serializer = DoctorShiftAssignmentSerializer(assignments, many=True)
+        
+        return Response({
+            'success': True,
+            'assignments': serializer.data,
+            'total': len(serializer.data)
+        })
+    
+    def post(self, request):
+        """Assign a doctor to a shift"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        doctor_id = request.data.get('doctor_id')
+        shift_id = request.data.get('shift_id')
+        shift_date = request.data.get('shift_date')
+        
+        # Validate inputs
+        if not all([doctor_id, shift_id, shift_date]):
+            return Response({'error': 'doctor_id, shift_id, and shift_date are required'}, status=400)
+        
+        # Validate doctor role
+        try:
+            doctor = User.objects.get(id=doctor_id)
+            if doctor.role not in ['END', 'GYN', 'ANE']:
+                return Response({'error': 'Only doctors (END, GYN, ANE) can be assigned shifts'}, status=400)
+        except User.DoesNotExist:
+            return Response({'error': 'Doctor not found'}, status=404)
+        
+        # Validate shift
+        try:
+            shift = Shift.objects.get(id=shift_id, is_active=True)
+        except Shift.DoesNotExist:
+            return Response({'error': 'Shift not found'}, status=404)
+        
+        # Validate date
+        try:
+            shift_date_obj = datetime.strptime(shift_date, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'error': 'Invalid date format. Use YYYY-MM-DD'}, status=400)
+        
+        # Check for conflicts
+        existing = DoctorShiftAssignment.objects.filter(
+            doctor=doctor,
+            shift_date=shift_date_obj,
+            status__in=['SCHEDULED', 'PENDING_SWAP']
+        ).exists()
+        
+        if existing:
+            return Response({
+                'error': f'Doctor {doctor.full_name} already has a shift on {shift_date}'
+            }, status=400)
+        
+        # Create assignment
+        assignment = DoctorShiftAssignment.objects.create(
+            doctor=doctor,
+            shift=shift,
+            shift_date=shift_date_obj,
+            assigned_by=request.user,
+            status='SCHEDULED'
+        )
+        
+        serializer = DoctorShiftAssignmentSerializer(assignment)
+        
+        return Response({
+            'success': True,
+            'message': f'{doctor.full_name} assigned to {shift.name} on {shift_date}',
+            'assignment': serializer.data
+        }, status=status.HTTP_201_CREATED)
+    
+    def delete(self, request, assignment_id):
+        """Cancel a shift assignment"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        try:
+            assignment = DoctorShiftAssignment.objects.get(id=assignment_id)
+            
+            # Don't allow cancelling completed shifts
+            if assignment.status == 'COMPLETED':
+                return Response({'error': 'Cannot cancel completed shift'}, status=400)
+            
+            assignment.status = 'CANCELLED'
+            assignment.save()
+            
+            return Response({
+                'success': True,
+                'message': f'Shift cancelled for {assignment.doctor.full_name} on {assignment.shift_date}'
+            })
+        except DoctorShiftAssignment.DoesNotExist:
+            return Response({'error': 'Assignment not found'}, status=404)
+
+class HRBulkShiftAssignmentView(APIView):
+    """HR can assign multiple doctors to shifts in bulk"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """Bulk assign shifts"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        assignments_data = request.data.get('assignments', [])
+        
+        if not assignments_data:
+            return Response({'error': 'No assignments provided'}, status=400)
+        
+        created = 0
+        errors = []
+        
+        for data in assignments_data:
+            try:
+                doctor = User.objects.get(id=data.get('doctor_id'), role__in=['END', 'GYN', 'ANE'])
+                shift = Shift.objects.get(id=data.get('shift_id'), is_active=True)
+                shift_date = timezone.datetime.strptime(data.get('shift_date'), '%Y-%m-%d').date()
+                
+                # Check for conflicts
+                existing = DoctorShiftAssignment.objects.filter(
+                    doctor=doctor,
+                    shift_date=shift_date,
+                    status__in=['SCHEDULED', 'PENDING_SWAP']
+                ).exists()
+                
+                if not existing:
+                    DoctorShiftAssignment.objects.create(
+                        doctor=doctor,
+                        shift=shift,
+                        shift_date=shift_date,
+                        assigned_by=request.user,
+                        status='SCHEDULED'
+                    )
+                    created += 1
+                else:
+                    errors.append(f"{doctor.full_name} already has shift on {shift_date}")
+                    
+            except Exception as e:
+                errors.append(str(e))
+        
+        return Response({
+            'success': True,
+            'message': f'Successfully created {created} shift assignments',
+            'errors': errors if errors else None,
+            'created_count': created
+        })
+
+
+class HRShiftSwapApprovalView(APIView):
+    """HR can approve/reject shift swap requests"""
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        """Get all pending swap requests"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        pending_swaps = ShiftSwapRequest.objects.filter(status='PENDING')
+        serializer = ShiftSwapRequestSerializer(pending_swaps, many=True)
+        
+        return Response({
+            'success': True,
+            'pending_swaps': serializer.data,
+            'count': len(serializer.data)
+        })
+    
+    def post(self, request, swap_id):
+        """Approve or reject a swap request"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        try:
+            swap = ShiftSwapRequest.objects.get(id=swap_id)
+        except ShiftSwapRequest.DoesNotExist:
+            return Response({'error': 'Swap request not found'}, status=404)
+        
+        action = request.data.get('action')
+        rejection_reason = request.data.get('rejection_reason', '')
+        
+        if action == 'approve':
+            # Execute the swap
+            requesting_orig = swap.requesting_assignment
+            target_orig = swap.target_assignment
+            
+            # Create new assignments for swapped doctors
+            DoctorShiftAssignment.objects.create(
+                doctor=swap.target_doctor,
+                shift=requesting_orig.shift,
+                shift_date=requesting_orig.shift_date,
+                assigned_by=request.user,
+                status='SWAPPED'
+            )
+            
+            DoctorShiftAssignment.objects.create(
+                doctor=swap.requesting_doctor,
+                shift=target_orig.shift,
+                shift_date=target_orig.shift_date,
+                assigned_by=request.user,
+                status='SWAPPED'
+            )
+            
+            # Cancel original assignments
+            requesting_orig.status = 'CANCELLED'
+            target_orig.status = 'CANCELLED'
+            requesting_orig.save()
+            target_orig.save()
+            
+            swap.status = 'APPROVED'
+            swap.approved_by = request.user
+            swap.approved_at = timezone.now()
+            swap.save()
+            
+            message = f'Shift swap approved between {swap.requesting_doctor.full_name} and {swap.target_doctor.full_name}'
+            
+        elif action == 'reject':
+            swap.status = 'REJECTED'
+            swap.rejection_reason = rejection_reason
+            swap.save()
+            
+            # Reset assignment status
+            swap.requesting_assignment.status = 'SCHEDULED'
+            swap.requesting_assignment.swap_requested_with = None
+            swap.requesting_assignment.save()
+            
+            message = 'Shift swap request rejected'
+        else:
+            return Response({'error': 'Action must be "approve" or "reject"'}, status=400)
+        
+        return Response({
+            'success': True,
+            'message': message
+        })
+
+
+class HRShiftAttendanceView(APIView):
+    """HR can mark and track doctor attendance"""
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request):
+        """Mark attendance for a doctor's shift"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        assignment_id = request.data.get('assignment_id')
+        status_attendance = request.data.get('status')
+        check_in = request.data.get('check_in')
+        check_out = request.data.get('check_out')
+        remarks = request.data.get('remarks', '')
+        
+        try:
+            assignment = DoctorShiftAssignment.objects.get(id=assignment_id)
+        except DoctorShiftAssignment.DoesNotExist:
+            return Response({'error': 'Assignment not found'}, status=404)
+        
+        # Create or update attendance record
+        attendance, created = ShiftAttendance.objects.update_or_create(
+            assignment=assignment,
+            date=assignment.shift_date,
+            defaults={
+                'status': status_attendance,
+                'check_in': check_in,
+                'check_out': check_out,
+                'marked_by': request.user,
+                'remarks': remarks
+            }
+        )
+        
+        # Update assignment status
+        if status_attendance == 'PRESENT':
+            assignment.is_present = True
+            assignment.check_in_time = check_in
+            assignment.check_out_time = check_out
+        else:
+            assignment.is_present = False
+        assignment.save()
+        
+        return Response({
+            'success': True,
+            'message': f'Attendance marked for {assignment.doctor.full_name} on {assignment.shift_date}'
+        })
+    
+    def get(self, request):
+        """Get attendance report"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        # Get date range
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        
+        if not start_date or not end_date:
+            today = timezone.now().date()
+            start_date = (today - timedelta(days=30)).isoformat()
+            end_date = today.isoformat()
+        
+        attendances = ShiftAttendance.objects.filter(
+            date__gte=start_date,
+            date__lte=end_date
+        ).select_related('assignment__doctor', 'assignment__shift')
+        
+        # Statistics
+        total = attendances.count()
+        present = attendances.filter(status='PRESENT').count()
+        absent = attendances.filter(status='ABSENT').count()
+        late = attendances.filter(status='LATE').count()
+        
+        return Response({
+            'success': True,
+            'statistics': {
+                'total': total,
+                'present': present,
+                'absent': absent,
+                'late': late,
+                'attendance_rate': round((present / total) * 100, 1) if total > 0 else 0
+            },
+            'attendances': ShiftAttendanceSerializer(attendances, many=True).data
+        })
+
+
+class HRShiftDashboardView(APIView):
+    """HR shift management dashboard statistics"""
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied'}, status=403)
+        
+        today = timezone.now().date()
+        week_start = today - timedelta(days=today.weekday())
+        week_end = week_start + timedelta(days=6)
+        month_start = today.replace(day=1)
+        
+        # Today's shifts summary
+        today_assignments = DoctorShiftAssignment.objects.filter(shift_date=today)
+        total_today = today_assignments.count()
+        present_today = today_assignments.filter(is_present=True).count()
+        
+        # Weekly coverage
+        weekly_assignments = DoctorShiftAssignment.objects.filter(
+            shift_date__gte=week_start,
+            shift_date__lte=week_end
+        )
+        
+        # Monthly coverage
+        monthly_assignments = DoctorShiftAssignment.objects.filter(
+            shift_date__gte=month_start,
+            shift_date__lte=today
+        )
+        
+        # Pending swap requests
+        pending_swaps = ShiftSwapRequest.objects.filter(status='PENDING').count()
+        
+        # Shift type distribution
+        shift_distribution = {}
+        for shift in Shift.objects.filter(is_active=True):
+            count = DoctorShiftAssignment.objects.filter(
+                shift=shift,
+                shift_date__gte=today
+            ).count()
+            if count > 0:
+                shift_distribution[shift.name] = count
+        
+        # Calculate attendance rate
+        attendances = ShiftAttendance.objects.filter(date__gte=week_start, date__lte=week_end)
+        total_attendance = attendances.count()
+        present_attendance = attendances.filter(status='PRESENT').count()
+        attendance_rate = round((present_attendance / total_attendance) * 100, 1) if total_attendance > 0 else 0
+        
+        return Response({
+            'success': True,
+            'today_summary': {
+                'total_shifts': total_today,
+                'present': present_today,
+                'absent': total_today - present_today,
+                'attendance_rate': round((present_today / total_today) * 100, 1) if total_today > 0 else 0
+            },
+            'weekly_summary': {
+                'total_shifts': weekly_assignments.count(),
+                'unique_doctors': weekly_assignments.values('doctor').distinct().count(),
+                'total_hours': weekly_assignments.aggregate(total=Sum('shift__duration_hours'))['total'] or 0
+            },
+            'monthly_summary': {
+                'total_shifts': monthly_assignments.count(),
+                'unique_doctors': monthly_assignments.values('doctor').distinct().count()
+            },
+            'shift_distribution': shift_distribution,
+            'attendance_rate': attendance_rate,
+            'pending_swaps': pending_swaps
+        })
+
+
+class HolidayManagementView(APIView):
+    """HR can manage company holidays"""
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        """Get all holidays for a year"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        year = request.query_params.get('year', timezone.now().year)
+        
+        try:
+            holidays = Holiday.objects.filter(date__year=year)
+            serializer = HolidaySerializer(holidays, many=True)
+            return Response({
+                'success': True,
+                'year': year,
+                'holidays': serializer.data,
+                'count': len(serializer.data)
+            })
+        except Exception as e:
+            return Response({'error': str(e)}, status=400)
+    
+    def post(self, request):
+        """Create a new holiday"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        serializer = HolidaySerializer(data=request.data)
+        if serializer.is_valid():
+            holiday = serializer.save()
+            return Response({
+                'success': True,
+                'message': f'Holiday "{holiday.name}" created successfully',
+                'holiday': serializer.data
+            }, status=status.HTTP_201_CREATED)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+    
+    def delete(self, request, holiday_id):
+        """Delete a holiday"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        try:
+            holiday = Holiday.objects.get(id=holiday_id)
+            holiday.delete()
+            return Response({
+                'success': True,
+                'message': f'Holiday "{holiday.name}" deleted successfully'
+            })
+        except Holiday.DoesNotExist:
+            return Response({'error': 'Holiday not found'}, status=404)
+
+
+class LeaveBalanceManagementView(APIView):
+    """HR can manage employee leave balances"""
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        """Get leave balances for all employees or specific one"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        user_id = request.query_params.get('user_id')
+        year = request.query_params.get('year', timezone.now().year)
+        
+        balances = LeaveBalance.objects.filter(year=year).select_related('user')
+        
+        if user_id:
+            balances = balances.filter(user_id=user_id)
+        
+        serializer = LeaveBalanceSerializer(balances, many=True)
+        
+        return Response({
+            'success': True,
+            'year': year,
+            'balances': serializer.data
+        })
+    
+    def post(self, request):
+        """Create or update leave balance for an employee"""
+        if request.user.role != 'HRM':
+            return Response({'error': 'Access denied. HR only.'}, status=403)
+        
+        user_id = request.data.get('user_id')
+        year = request.data.get('year', timezone.now().year)
+        
+        if not user_id:
+            return Response({'error': 'user_id is required'}, status=400)
+        
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({'error': 'User not found'}, status=404)
+        
+        balance, created = LeaveBalance.objects.update_or_create(
+            user=user,
+            year=year,
+            defaults={
+                'annual_allocated': request.data.get('annual_allocated', 20),
+                'sick_allocated': request.data.get('sick_allocated', 12),
+                'casual_allocated': request.data.get('casual_allocated', 10),
+                'annual_used': request.data.get('annual_used', 0),
+                'sick_used': request.data.get('sick_used', 0),
+                'casual_used': request.data.get('casual_used', 0)
+            }
+        )
+        
+        serializer = LeaveBalanceSerializer(balance)
+        
+        return Response({
+            'success': True,
+            'message': f'Leave balance {"created" if created else "updated"} for {user.full_name}',
+            'balance': serializer.data
+        })
