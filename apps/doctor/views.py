@@ -680,51 +680,115 @@ class DoctorPrescriptionsView(APIView):
         }, status=status.HTTP_201_CREATED)
     
     def get(self, request):
-        """Get prescriptions for a patient"""
+        """Get prescriptions - either for a specific patient OR all prescriptions by this doctor"""
         doctor = request.user
         patient_id = request.query_params.get('patient_id')
         
-        if not patient_id:
-            return Response({'error': 'patient_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+        # ✅ If patient_id is provided, return prescriptions for that specific patient
+        if patient_id:
+            try:
+                patient = PatientProfile.objects.get(id=patient_id)
+            except PatientProfile.DoesNotExist:
+                return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
+            
+            # Get prescriptions for this specific patient (by this doctor)
+            records = EMRRecord.objects.filter(
+                patient=patient,
+                record_type='PRESCRIPTION',
+                created_by=doctor
+            ).select_related('created_by').prefetch_related('prescriptions').order_by('-created_at')
+            
+            prescriptions = []
+            for record in records:
+                # Get ALL prescriptions for each record
+                for prescription in record.prescriptions.all():
+                    prescriptions.append({
+                        'id': prescription.id,
+                        'medication': prescription.medication_name,
+                        'dosage': prescription.dosage,
+                        'frequency': prescription.frequency,
+                        'duration': prescription.duration,
+                        'route': prescription.route,
+                        'instructions': prescription.instructions,
+                        'date': record.date.strftime('%Y-%m-%d'),
+                        'prescribed_by': record.created_by.full_name if record.created_by else None
+                    })
+            
+            return Response({
+                'success': True,
+                'patient': {
+                    'id': patient.id,
+                    'name': patient.user.full_name,
+                    'mrn': patient.patient_id
+                },
+                'count': len(prescriptions),
+                'prescriptions': prescriptions
+            })
         
-        try:
-            patient = PatientProfile.objects.get(id=patient_id)
-        except PatientProfile.DoesNotExist:
-            return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
-        
+        # ✅ NEW: Get ALL prescriptions prescribed by this doctor (for all patients)
+        # This is for the prescription history page
         records = EMRRecord.objects.filter(
-            patient=patient,
-            record_type='PRESCRIPTION'
-        ).select_related('patient__user')
+            record_type='PRESCRIPTION',
+            created_by=doctor  # Only this doctor's prescriptions
+        ).select_related('patient__user', 'created_by').prefetch_related('prescriptions').order_by('-created_at')
         
         prescriptions = []
         for record in records:
-            prescription = record.prescriptions.first()
-            if prescription:
+            for prescription in record.prescriptions.all():
+                # Calculate status (active/expired based on duration)
+                status = self.get_prescription_status(record.date, prescription.duration)
+                
                 prescriptions.append({
                     'id': prescription.id,
-                    'medication': prescription.medication_name,
+                    'prescription_id': f"RX-{prescription.id}",  # Format as RX-1, RX-2, etc.
+                    'patient_mrn': record.patient.patient_id,
+                    'patient_name': record.patient.user.full_name,
+                    'prescribed_date': record.date.strftime('%Y-%m-%d'),
+                    'medicine': prescription.medication_name,
                     'dosage': prescription.dosage,
-                    'frequency': prescription.frequency,
                     'duration': prescription.duration,
+                    'status': status,
+                    'frequency': prescription.frequency,
                     'route': prescription.route,
                     'instructions': prescription.instructions,
-                    'date': record.date,
                     'prescribed_by': record.created_by.full_name if record.created_by else None
                 })
         
+        # Calculate summary statistics for the dashboard cards
+        active_count = len([p for p in prescriptions if p['status'] == 'Active'])
+        patients_set = set([p['patient_mrn'] for p in prescriptions])
+        today_count = len([p for p in prescriptions if p['prescribed_date'] == str(timezone.now().date())])
+        
         return Response({
             'success': True,
-            'patient': {
-                'id': patient.id,
-                'name': patient.user.full_name,
-                'mrn': patient.patient_id
-            },
             'count': len(prescriptions),
-            'prescriptions': prescriptions
+            'prescriptions': prescriptions,
+            'summary': {
+                'total_prescriptions': len(prescriptions),
+                'active_medications': active_count,
+                'patients_prescribed': len(patients_set),
+                'issued_today': today_count
+            }
         })
-
-
+    
+    def get_prescription_status(self, prescribed_date, duration):
+        """Calculate if prescription is active or expired based on duration"""
+        try:
+            import re
+            # Extract number from duration (e.g., "5 days" -> 5, "10" -> 10)
+            numbers = re.findall(r'\d+', str(duration))
+            if numbers:
+                days = int(numbers[0])
+                expiry_date = prescribed_date + timedelta(days=days)
+                if expiry_date >= timezone.now().date():
+                    return 'Active'
+                else:
+                    return 'Expired'
+            else:
+                # If no number found, assume active
+                return 'Active'
+        except:
+            return 'Active'
 # apps/doctor/views.py - Replace your existing DoctorProfileView with this
 
 # apps/doctor/views.py - Replace your DoctorProfileView with this
@@ -1293,3 +1357,225 @@ class DoctorCancelLeaveView(APIView):
             }
         })
 
+# ========== MEDICINE INVENTORY VIEW FOR DOCTOR PORTAL ==========
+
+# ========== MEDICINE INVENTORY VIEW FOR DOCTOR PORTAL ==========
+
+# ========== MEDICINE INVENTORY VIEW FOR DOCTOR PORTAL ==========
+
+# ========== MEDICINE INVENTORY VIEW FOR DOCTOR PORTAL ==========
+
+class DoctorMedicineInventoryView(APIView):
+    """
+    Get medicine inventory overview for doctor portal
+    GET /api/doctor/medicines/ - List all medicines with filters
+    GET /api/doctor/medicines/{id}/ - Get single medicine details
+    """
+    permission_classes = [IsAuthenticated, IsDoctor]
+    
+    def get(self, request, id=None):
+        """Get medicines list or single medicine details"""
+        
+        # If ID is provided, get single medicine
+        if id:
+            try:
+                from pharmacy.models import Medication
+                medication = Medication.objects.select_related(
+                    'category', 'manufacturer'
+                ).get(id=id, is_active=True)
+            except ImportError:
+                return Response({
+                    'success': False,
+                    'error': 'Pharmacy module not available'
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            except Medication.DoesNotExist:
+                return Response({
+                    'success': False,
+                    'error': 'Medicine not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            return Response({
+                'success': True,
+                'data': {
+                    'id': medication.id,
+                    'medication_id': medication.medication_id,
+                    'name': medication.name,
+                    'generic_name': medication.generic_name,
+                    'category': medication.category.name if medication.category else None,
+                    'category_id': medication.category_id,
+                    'manufacturer': medication.manufacturer.name if medication.manufacturer else None,
+                    'manufacturer_id': medication.manufacturer_id,
+                    'current_stock': medication.current_stock,
+                    'reorder_level': medication.reorder_level,
+                    'minimum_stock': medication.minimum_stock,
+                    'unit': medication.unit,
+                    'unit_price': float(medication.unit_price) if medication.unit_price else 0,
+                    'selling_price': float(medication.selling_price) if medication.selling_price else 0,
+                    'expiry_date': medication.expiry_date.strftime('%Y-%m-%d') if medication.expiry_date else None,
+                    'batch_number': medication.batch_number,
+                    'is_active': medication.is_active,
+                    'availability': self.get_availability_status(medication),
+                    'created_at': medication.created_at,
+                    'updated_at': medication.updated_at
+                }
+            })
+        
+        # List all medicines with filters
+        try:
+            from pharmacy.models import Medication
+            from django.db.models import F, Q, Sum
+        except ImportError:
+            return Response({
+                'success': False,
+                'error': 'Pharmacy module not available'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        medicines = Medication.objects.select_related(
+            'category', 'manufacturer'
+        ).filter(is_active=True)
+        
+        # 1. Search filter
+        search = request.query_params.get('search')
+        if search:
+            medicines = medicines.filter(
+                Q(name__icontains=search) |
+                Q(generic_name__icontains=search) |
+                Q(medication_id__icontains=search) |
+                Q(batch_number__icontains=search)
+            )
+        
+        # 2. Category filter
+        category = request.query_params.get('category')
+        if category:
+            medicines = medicines.filter(category_id=category)
+        
+        # 3. Status filter (available, low_stock, out_of_stock)
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            if status_filter == 'AVAILABLE':
+                medicines = medicines.filter(current_stock__gt=F('reorder_level'))
+            elif status_filter == 'LOW_STOCK':
+                medicines = medicines.filter(
+                    current_stock__lte=F('reorder_level'),
+                    current_stock__gt=0
+                )
+            elif status_filter == 'OUT_OF_STOCK':
+                medicines = medicines.filter(current_stock=0)
+        
+        # 4. Sorting
+        sort_by = request.query_params.get('sort_by', 'name')
+        if sort_by == 'name':
+            medicines = medicines.order_by('name')
+        elif sort_by == '-name':
+            medicines = medicines.order_by('-name')
+        elif sort_by == 'stock':
+            medicines = medicines.order_by('current_stock')
+        elif sort_by == '-stock':
+            medicines = medicines.order_by('-current_stock')
+        
+        # 5. Pagination
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 20))
+        total = medicines.count()
+        start = (page - 1) * page_size
+        end = start + page_size
+        paginated_medicines = medicines[start:end]
+        
+        # Build response data
+        medicine_list = []
+        for med in paginated_medicines:
+            medicine_list.append({
+                'id': med.id,
+                'medication_id': med.medication_id,
+                'name': med.name,
+                'generic_name': med.generic_name,
+                'category': med.category.name if med.category else 'Uncategorized',
+                'category_id': med.category_id,
+                'current_stock': med.current_stock,
+                'unit': med.unit,
+                'reorder_level': med.reorder_level,
+                'minimum_stock': med.minimum_stock,
+                'selling_price': float(med.selling_price) if med.selling_price else 0,
+                'expiry_date': med.expiry_date.strftime('%Y-%m-%d') if med.expiry_date else None,
+                'batch_number': med.batch_number,
+                'availability': self.get_availability_status(med),
+                'status_badge': self.get_status_badge(med),
+                'manufacturer': med.manufacturer.name if med.manufacturer else None
+            })
+        
+        # Get summary statistics for the cards
+        summary = {
+            'available_medicines': medicines.filter(current_stock__gt=F('reorder_level')).count(),
+            'low_stock_warnings': medicines.filter(
+                current_stock__lte=F('reorder_level'),
+                current_stock__gt=0
+            ).count(),
+            'out_of_stock': medicines.filter(current_stock=0).count(),
+            'total_medicines': total
+        }
+        
+        return Response({
+            'success': True,
+            'data': medicine_list,
+            'summary': summary,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total_pages': (total + page_size - 1) // page_size if page_size > 0 else 1,
+                'total': total
+            }
+        })
+    
+    def get_availability_status(self, medication):
+        """Get availability status of a medicine"""
+        if medication.current_stock <= 0:
+            return 'Out of Stock'
+        elif medication.current_stock <= medication.reorder_level:
+            return 'Low Stock'
+        else:
+            return 'Available'
+    
+    def get_status_badge(self, medication):
+        """Get status badge color"""
+        if medication.current_stock <= 0:
+            return 'danger'  # Red
+        elif medication.current_stock <= medication.reorder_level:
+            return 'warning'  # Yellow/Orange
+        else:
+            return 'success'  # Green
+
+
+class DoctorMedicineCategoriesView(APIView):
+    """
+    Get medicine categories with counts
+    GET /api/doctor/medicines/categories/
+    """
+    permission_classes = [IsAuthenticated, IsDoctor]
+    
+    def get(self, request):
+        try:
+            from pharmacy.models import MedicationCategory
+            from django.db.models import Count
+        except ImportError:
+            return Response({
+                'success': False,
+                'error': 'Pharmacy module not available'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        categories = MedicationCategory.objects.filter(is_active=True).annotate(
+            medication_count=Count('medications')
+        ).order_by('name')
+        
+        data = []
+        for category in categories:
+            data.append({
+                'id': category.id,
+                'name': category.name,
+                'description': category.description if hasattr(category, 'description') else None,
+                'medication_count': category.medication_count
+            })
+        
+        return Response({
+            'success': True,
+            'data': data
+        })

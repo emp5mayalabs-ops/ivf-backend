@@ -7,8 +7,9 @@ from .views import (
     DoctorAppointmentsView, DoctorClinicalNotesView,
     DoctorPrescriptionsView, DoctorProfileView,
     DoctorCalendarView, DoctorLeaveRequestView,
-    DoctorLeaveBalanceView,
-    DoctorCancelLeaveView,DoctorChangePasswordView
+    DoctorLeaveBalanceView,DoctorMedicineInventoryView,
+    DoctorCancelLeaveView,DoctorChangePasswordView,
+    DoctorMedicineCategoriesView,
 )
 
 urlpatterns = [
@@ -45,4 +46,9 @@ urlpatterns = [
     path('leave/request/', DoctorLeaveRequestView.as_view(), name='doctor_leave_request'),
     path('leave/balance/', DoctorLeaveBalanceView.as_view(), name='doctor_leave_balance'),
     path('leave/cancel/<int:leave_id>/', DoctorCancelLeaveView.as_view(), name='doctor_leave_cancel'),
+    # medicine inventory
+    path('medicines/', DoctorMedicineInventoryView.as_view(), name='doctor-medicines'),
+    path('medicines/<int:id>/', DoctorMedicineInventoryView.as_view(), name='doctor-medicine-detail'),
+    path('medicines/categories/', DoctorMedicineCategoriesView.as_view(), name='doctor-medicine-categories'),
+
 ]

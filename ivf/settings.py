@@ -65,6 +65,7 @@ INSTALLED_APPS = [
     'reporting',
     'telehealth',
     'apps.doctor',
+    'attendance',
     
 ]
 
