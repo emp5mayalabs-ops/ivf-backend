@@ -1,4 +1,5 @@
-# apps/pharmacy/urls.py
+# apps/pharmacy/urls.py - COMPLETE WITH PRESCRIPTION FULFILLMENT URLs
+
 from django.urls import path
 from .views import (
     PharmacistLoginView,
@@ -11,6 +12,17 @@ from .views import (
     InventorySummaryAPIView,
     MedicationCategoriesAPIView,
     MedicationManufacturersAPIView,
+    PharmacyDashboardAPIView,
+    DashboardSummaryAPIView,
+    # NEW: Import prescription views
+    PrescriptionOrdersView,
+    ReceivePrescriptionView,
+    FulfillPrescriptionView,
+    PrescriptionOrderStatsView,
+    PharmacyBillListView,
+    PharmacyBillDetailView,
+    PharmacyPaymentView,
+    PharmacyBillingDashboardView,
 )
 
 app_name = 'pharmacy'
@@ -40,4 +52,21 @@ urlpatterns = [
     # ========== CATEGORIES & MANUFACTURERS ==========
     path('inventory/categories/', MedicationCategoriesAPIView.as_view(), name='categories'),
     path('inventory/manufacturers/', MedicationManufacturersAPIView.as_view(), name='manufacturers'),
+
+    # ========== DASHBOARD ==========
+    path('dashboard/', PharmacyDashboardAPIView.as_view(), name='pharmacy_dashboard'),
+    path('dashboard/summary/', DashboardSummaryAPIView.as_view(), name='dashboard_summary'),
+    
+    # ========== PRESCRIPTION FULFILLMENT (NEW) ==========
+    path('prescriptions/', PrescriptionOrdersView.as_view(), name='prescription-orders'),
+    path('prescriptions/<int:id>/', PrescriptionOrdersView.as_view(), name='prescription-order-detail'),
+    path('prescriptions/receive/', ReceivePrescriptionView.as_view(), name='receive-prescription'),
+    path('prescriptions/<int:order_id>/fulfill/', FulfillPrescriptionView.as_view(), name='fulfill-prescription'),
+    path('prescriptions/stats/', PrescriptionOrderStatsView.as_view(), name='prescription-stats'),
+
+    # ========== BILLING ==========
+    path('bills/', PharmacyBillListView.as_view(), name='bill-list'),
+    path('bills/<int:pk>/', PharmacyBillDetailView.as_view(), name='bill-detail'),
+    path('bills/<int:pk>/pay/', PharmacyPaymentView.as_view(), name='bill-pay'),
+    path('billing/dashboard/', PharmacyBillingDashboardView.as_view(), name='billing-dashboard'),
 ]

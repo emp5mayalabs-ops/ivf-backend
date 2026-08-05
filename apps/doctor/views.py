@@ -13,7 +13,7 @@ from .serializers import (
     DoctorQueueSerializer, DoctorPatientListSerializer,
     DoctorPatientDetailSerializer, DoctorAppointmentSerializer,
     DoctorClinicalNoteSerializer, DoctorPrescriptionSerializer,
-    DoctorStatsSerializer
+    DoctorStatsSerializer,
 )
 from appointments.models import OPTicket, Appointment
 from patients.models import PatientProfile
@@ -628,12 +628,14 @@ class DoctorClinicalNotesView(APIView):
         })
 
 
+# apps/doctor/views.py - REPLACE the entire DoctorPrescriptionsView with this
+
 class DoctorPrescriptionsView(APIView):
-    """Create and manage prescriptions"""
+    """Create and manage prescriptions with pharmacy integration"""
     permission_classes = [IsAuthenticated, IsDoctor]
     
     def post(self, request):
-        """Create a prescription for a patient"""
+        """Create a prescription and send to pharmacy"""
         doctor = request.user
         serializer = DoctorPrescriptionSerializer(data=request.data)
         
@@ -641,12 +643,39 @@ class DoctorPrescriptionsView(APIView):
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
         patient = serializer.validated_data['patient_id']
+        medication_name = serializer.validated_data['medication_name']
+        quantity = request.data.get('quantity', 1)
+        
+        # Check if medicine exists in pharmacy inventory
+        medicine_info = None
+        medicine = None
+        try:
+            from pharmacy.models import Medication
+            medicine = Medication.objects.filter(
+                Q(name__iexact=medication_name) |
+                Q(generic_name__iexact=medication_name),
+                is_active=True
+            ).first()
+            
+            if medicine:
+                medicine_info = {
+                    'id': medicine.id,
+                    'name': medicine.name,
+                    'generic_name': medicine.generic_name,
+                    'current_stock': medicine.current_stock,
+                    'unit': medicine.unit,
+                    'is_available': medicine.current_stock > 0,
+                    'is_low_stock': medicine.current_stock <= medicine.reorder_level and medicine.current_stock > 0,
+                    'selling_price': float(medicine.selling_price) if medicine.selling_price else 0,
+                }
+        except ImportError:
+            pass
         
         # Create EMR record for prescription
         emr_record = EMRRecord.objects.create(
             patient=patient,
             record_type='PRESCRIPTION',
-            title=f"Prescription - {serializer.validated_data['medication_name']}",
+            title=f"Prescription - {medication_name}",
             date=timezone.now().date(),
             created_by=doctor
         )
@@ -654,13 +683,53 @@ class DoctorPrescriptionsView(APIView):
         # Create prescription
         prescription = Prescription.objects.create(
             record=emr_record,
-            medication_name=serializer.validated_data['medication_name'],
+            medication_name=medication_name,
             dosage=serializer.validated_data['dosage'],
             frequency=serializer.validated_data['frequency'],
             duration=serializer.validated_data['duration'],
             route=serializer.validated_data['route'],
             instructions=serializer.validated_data.get('instructions', '')
         )
+        
+        # ========== SEND TO PHARMACY ==========
+        pharmacy_order = None
+        pharmacy_status = "ℹ️ Pharmacy module not available"
+        
+        try:
+            from pharmacy.models import PrescriptionOrder
+            
+            # Create pharmacy order
+            pharmacy_order = PrescriptionOrder.objects.create(
+                prescription=prescription,
+                patient=patient,
+                doctor=doctor,
+                medication_name=medication_name,
+                requested_quantity=quantity,
+                fulfilled_quantity=0,
+                status='PENDING',
+                medication=medicine if medicine else None,
+                notes=serializer.validated_data.get('instructions', '')
+            )
+            
+            # Check stock
+            if medicine:
+                if medicine.current_stock <= 0:
+                    pharmacy_order.status = 'OUT_OF_STOCK'
+                    pharmacy_order.save()
+                    pharmacy_status = "⚠️ Medicine is out of stock"
+                elif medicine.current_stock < quantity:
+                    pharmacy_order.status = 'PARTIALLY_FULFILLED'
+                    pharmacy_order.save()
+                    pharmacy_status = f"⚠️ Only {medicine.current_stock} units available"
+                else:
+                    pharmacy_status = "✅ Medicine available in pharmacy"
+            else:
+                pharmacy_status = "⚠️ Medicine not found in pharmacy inventory"
+                
+        except ImportError:
+            pharmacy_status = "ℹ️ Pharmacy module not available"
+        except Exception as e:
+            pharmacy_status = f"⚠️ Error sending to pharmacy: {str(e)}"
         
         return Response({
             'success': True,
@@ -675,16 +744,29 @@ class DoctorPrescriptionsView(APIView):
                 'duration': prescription.duration,
                 'route': prescription.route,
                 'instructions': prescription.instructions,
-                'date': emr_record.date
+                'date': emr_record.date,
+                'quantity': quantity,
+                'pharmacy_status': pharmacy_status,
+                'pharmacy_order_id': pharmacy_order.id if pharmacy_order else None,
+                'pharmacy_order_status': pharmacy_order.status if pharmacy_order else None,
+                'medicine_info': medicine_info,
             }
         }, status=status.HTTP_201_CREATED)
     
     def get(self, request):
-        """Get prescriptions - either for a specific patient OR all prescriptions by this doctor"""
+        """Get prescriptions - either for a specific patient OR search medicines"""
         doctor = request.user
+        
+        # ========== CHECK IF THIS IS A MEDICINE SEARCH REQUEST ==========
+        search_medicines = request.query_params.get('search_medicines')
+        
+        if search_medicines is not None and search_medicines.lower() == 'true':
+            # This is a medicine search request - return available medicines
+            return self.search_available_medicines(request)
+        
+        # ========== EXISTING: Get prescriptions for a specific patient ==========
         patient_id = request.query_params.get('patient_id')
         
-        # ✅ If patient_id is provided, return prescriptions for that specific patient
         if patient_id:
             try:
                 patient = PatientProfile.objects.get(id=patient_id)
@@ -700,8 +782,23 @@ class DoctorPrescriptionsView(APIView):
             
             prescriptions = []
             for record in records:
-                # Get ALL prescriptions for each record
                 for prescription in record.prescriptions.all():
+                    # Get pharmacy order info if exists
+                    pharmacy_info = None
+                    try:
+                        if hasattr(prescription, 'pharmacy_order'):
+                            order = prescription.pharmacy_order
+                            pharmacy_info = {
+                                'order_id': order.order_id,
+                                'status': order.status,
+                                'status_display': order.get_status_display(),
+                                'requested_quantity': order.requested_quantity,
+                                'fulfilled_quantity': order.fulfilled_quantity,
+                                'fulfilled_at': order.fulfilled_at,
+                            }
+                    except:
+                        pass
+                    
                     prescriptions.append({
                         'id': prescription.id,
                         'medication': prescription.medication_name,
@@ -711,7 +808,8 @@ class DoctorPrescriptionsView(APIView):
                         'route': prescription.route,
                         'instructions': prescription.instructions,
                         'date': record.date.strftime('%Y-%m-%d'),
-                        'prescribed_by': record.created_by.full_name if record.created_by else None
+                        'prescribed_by': record.created_by.full_name if record.created_by else None,
+                        'pharmacy': pharmacy_info,
                     })
             
             return Response({
@@ -725,11 +823,10 @@ class DoctorPrescriptionsView(APIView):
                 'prescriptions': prescriptions
             })
         
-        # ✅ NEW: Get ALL prescriptions prescribed by this doctor (for all patients)
-        # This is for the prescription history page
+        # ========== EXISTING: Get ALL prescriptions by this doctor ==========
         records = EMRRecord.objects.filter(
             record_type='PRESCRIPTION',
-            created_by=doctor  # Only this doctor's prescriptions
+            created_by=doctor
         ).select_related('patient__user', 'created_by').prefetch_related('prescriptions').order_by('-created_at')
         
         prescriptions = []
@@ -738,9 +835,24 @@ class DoctorPrescriptionsView(APIView):
                 # Calculate status (active/expired based on duration)
                 status = self.get_prescription_status(record.date, prescription.duration)
                 
+                # Get pharmacy order info if exists
+                pharmacy_info = None
+                try:
+                    if hasattr(prescription, 'pharmacy_order'):
+                        order = prescription.pharmacy_order
+                        pharmacy_info = {
+                            'order_id': order.order_id,
+                            'status': order.status,
+                            'status_display': order.get_status_display(),
+                            'requested_quantity': order.requested_quantity,
+                            'fulfilled_quantity': order.fulfilled_quantity,
+                        }
+                except:
+                    pass
+                
                 prescriptions.append({
                     'id': prescription.id,
-                    'prescription_id': f"RX-{prescription.id}",  # Format as RX-1, RX-2, etc.
+                    'prescription_id': f"RX-{prescription.id}",
                     'patient_mrn': record.patient.patient_id,
                     'patient_name': record.patient.user.full_name,
                     'prescribed_date': record.date.strftime('%Y-%m-%d'),
@@ -751,7 +863,8 @@ class DoctorPrescriptionsView(APIView):
                     'frequency': prescription.frequency,
                     'route': prescription.route,
                     'instructions': prescription.instructions,
-                    'prescribed_by': record.created_by.full_name if record.created_by else None
+                    'prescribed_by': record.created_by.full_name if record.created_by else None,
+                    'pharmacy': pharmacy_info,
                 })
         
         # Calculate summary statistics for the dashboard cards
@@ -768,6 +881,198 @@ class DoctorPrescriptionsView(APIView):
                 'active_medications': active_count,
                 'patients_prescribed': len(patients_set),
                 'issued_today': today_count
+            }
+        })
+    
+    def search_available_medicines(self, request):
+        """
+        Search for available medicines from pharmacy inventory
+        GET /api/doctor/prescriptions/?search_medicines=true&q=paracetamol&category=1
+        
+        Parameters:
+        - q: Search query (name, generic_name, medication_id, batch_number)
+        - category: Category ID filter
+        - status: Filter by stock status (AVAILABLE, LOW_STOCK, OUT_OF_STOCK, IN_STOCK)
+        - sort_by: Sort field (name, -name, stock, -stock, price, -price, expiry, -expiry)
+        - page: Page number (default: 1)
+        - page_size: Items per page (default: 20)
+        """
+        try:
+            from pharmacy.models import Medication
+            from django.db.models import Q, F
+        except ImportError:
+            return Response({
+                'success': False,
+                'error': 'Pharmacy module not available'
+            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
+        # Get search parameters
+        query = request.query_params.get('q', '').strip()
+        category_id = request.query_params.get('category')
+        status_filter = request.query_params.get('status', '')
+        sort_by = request.query_params.get('sort_by', 'name')
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 20))
+        
+        # Base queryset - only active medicines
+        medicines = Medication.objects.filter(
+            is_active=True
+        ).select_related('category', 'manufacturer')
+        
+        # ========== APPLY SEARCH FILTERS ==========
+        
+        # 1. Search by name, generic, medication_id, batch_number, manufacturer
+        if query:
+            medicines = medicines.filter(
+                Q(name__icontains=query) |
+                Q(generic_name__icontains=query) |
+                Q(medication_id__icontains=query) |
+                Q(batch_number__icontains=query) |
+                Q(manufacturer__name__icontains=query)
+            )
+        
+        # 2. Category filter
+        if category_id:
+            medicines = medicines.filter(category_id=category_id)
+        
+        # 3. Stock status filter
+        if status_filter:
+            if status_filter.upper() == 'AVAILABLE':
+                medicines = medicines.filter(current_stock__gt=F('reorder_level'))
+            elif status_filter.upper() == 'LOW_STOCK':
+                medicines = medicines.filter(
+                    current_stock__lte=F('reorder_level'),
+                    current_stock__gt=0
+                )
+            elif status_filter.upper() == 'OUT_OF_STOCK':
+                medicines = medicines.filter(current_stock=0)
+            elif status_filter.upper() == 'IN_STOCK':
+                medicines = medicines.filter(current_stock__gt=0)
+        
+        # 4. Sorting
+        if sort_by == 'name':
+            medicines = medicines.order_by('name')
+        elif sort_by == '-name':
+            medicines = medicines.order_by('-name')
+        elif sort_by == 'stock':
+            medicines = medicines.order_by('current_stock')
+        elif sort_by == '-stock':
+            medicines = medicines.order_by('-current_stock')
+        elif sort_by == 'price':
+            medicines = medicines.order_by('selling_price')
+        elif sort_by == '-price':
+            medicines = medicines.order_by('-selling_price')
+        elif sort_by == 'expiry':
+            medicines = medicines.order_by('expiry_date')
+        elif sort_by == '-expiry':
+            medicines = medicines.order_by('-expiry_date')
+        else:
+            medicines = medicines.order_by('name')
+        
+        # ========== COUNT FOR PAGINATION ==========
+        total = medicines.count()
+        total_pages = (total + page_size - 1) // page_size if page_size > 0 else 1
+        
+        # ========== APPLY PAGINATION ==========
+        start = (page - 1) * page_size
+        end = start + page_size
+        paginated_medicines = medicines[start:end]
+        
+        # ========== BUILD RESPONSE DATA ==========
+        medicine_list = []
+        for med in paginated_medicines:
+            # Get stock status
+            if med.current_stock <= 0:
+                stock_status = 'OUT_OF_STOCK'
+                status_display = 'Out of Stock'
+                badge_color = 'danger'
+            elif med.current_stock <= med.reorder_level:
+                stock_status = 'LOW_STOCK'
+                status_display = 'Low Stock'
+                badge_color = 'warning'
+            else:
+                stock_status = 'AVAILABLE'
+                status_display = 'Available'
+                badge_color = 'success'
+            
+            # Check if expiring soon (within 30 days)
+            is_expiring_soon = False
+            days_until_expiry = None
+            if med.expiry_date:
+                today = timezone.now().date()
+                days_until_expiry = (med.expiry_date - today).days
+                is_expiring_soon = 0 <= days_until_expiry <= 30
+            
+            medicine_list.append({
+                'id': med.id,
+                'medication_id': med.medication_id,
+                'name': med.name,
+                'generic_name': med.generic_name,
+                'category': med.category.name if med.category else 'Uncategorized',
+                'category_id': med.category_id,
+                'manufacturer': med.manufacturer.name if med.manufacturer else None,
+                'manufacturer_id': med.manufacturer_id,
+                'current_stock': med.current_stock,
+                'unit': med.unit,
+                'reorder_level': med.reorder_level,
+                'minimum_stock': med.minimum_stock,
+                'unit_price': float(med.unit_price) if med.unit_price else 0,
+                'selling_price': float(med.selling_price) if med.selling_price else 0,
+                'dosage_form': med.dosage_form if hasattr(med, 'dosage_form') else None,
+                'strength': med.strength if hasattr(med, 'strength') else None,
+                'expiry_date': med.expiry_date.strftime('%Y-%m-%d') if med.expiry_date else None,
+                'batch_number': med.batch_number,
+                'stock_status': stock_status,
+                'status_display': status_display,
+                'badge_color': badge_color,
+                'is_expiring_soon': is_expiring_soon,
+                'days_until_expiry': days_until_expiry,
+                'requires_prescription': med.requires_prescription,
+                'is_controlled': med.is_controlled,
+                'description': med.description if hasattr(med, 'description') else None,
+                'side_effects': med.side_effects if hasattr(med, 'side_effects') else None,
+                'precautions': med.precautions if hasattr(med, 'precautions') else None,
+            })
+        
+        # ========== GET CATEGORIES FOR FILTER ==========
+        categories = []
+        try:
+            from pharmacy.models import MedicationCategory
+            categories = list(MedicationCategory.objects.filter(
+                is_active=True
+            ).values('id', 'name').order_by('name'))
+        except:
+            pass
+        
+        # ========== SUMMARY STATISTICS ==========
+        summary = {
+            'total_medicines': total,
+            'available_count': medicines.filter(current_stock__gt=F('reorder_level')).count(),
+            'low_stock_count': medicines.filter(
+                current_stock__lte=F('reorder_level'),
+                current_stock__gt=0
+            ).count(),
+            'out_of_stock_count': medicines.filter(current_stock=0).count(),
+        }
+        
+        return Response({
+            'success': True,
+            'data': {
+                'medicines': medicine_list,
+                'categories': categories,
+                'summary': summary,
+                'pagination': {
+                    'page': page,
+                    'page_size': page_size,
+                    'total_pages': total_pages,
+                    'total': total
+                },
+                'filters': {
+                    'query': query,
+                    'category': category_id,
+                    'status': status_filter,
+                    'sort_by': sort_by
+                }
             }
         })
     
@@ -1578,4 +1883,327 @@ class DoctorMedicineCategoriesView(APIView):
         return Response({
             'success': True,
             'data': data
+        })
+    
+# ========== DOCTOR LAB INTEGRATION VIEWS ==========
+
+class DoctorAvailableTestsView(APIView):
+    """
+    GET /api/doctor/available-tests/
+    Get all available lab tests a doctor can order
+    """
+    permission_classes = [IsAuthenticated, IsDoctor]
+    
+    def get(self, request):
+        from lab.models import LabTestType
+        
+        test_types = LabTestType.objects.filter(is_active=True)
+        
+        # Search filter
+        search = request.query_params.get('search')
+        if search:
+            test_types = test_types.filter(
+                Q(name__icontains=search) |
+                Q(code__icontains=search) |
+                Q(description__icontains=search)
+            )
+        
+        # Build response with field info
+        data = []
+        for test in test_types:
+            fields = test.fields.filter(is_active=True).order_by('display_order')
+            data.append({
+                'id': test.id,
+                'name': test.name,
+                'code': test.code,
+                'description': test.description,
+                'icon': test.icon,
+                'color': test.color,
+                'fields': [{
+                    'id': field.id,
+                    'label': field.label,
+                    'field_key': field.field_key,
+                    'field_type': field.field_type,
+                    'is_required': field.is_required,
+                    'options': field.get_options_list() if field.field_type in ['select', 'radio', 'multiselect'] else None,
+                } for field in fields],
+                'field_count': fields.count(),
+            })
+        
+        return Response({
+            'success': True,
+            'count': len(data),
+            'tests': data
+        })
+
+
+class DoctorLabOrdersView(APIView):
+    """
+    GET /api/doctor/lab-orders/ - View all lab orders
+    POST /api/doctor/lab-orders/ - Order a new lab test for any patient
+    """
+    permission_classes = [IsAuthenticated, IsDoctor]
+    
+    def get(self, request):
+        """Get all lab orders with optional filters"""
+        doctor = request.user
+        
+        from lab.models import LabRecord
+        from patients.models import PatientProfile
+        from django.db.models import Q
+        
+        # Get all active lab orders
+        orders = LabRecord.objects.filter(is_active=True).select_related(
+            'patient', 'test_type', 'created_by', 'updated_by'
+        ).order_by('-created_at')
+        
+        # Apply status filter
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            orders = orders.filter(status=status_filter)
+        
+        # Apply priority filter
+        priority_filter = request.query_params.get('priority')
+        if priority_filter:
+            orders = orders.filter(priority=priority_filter)
+        
+        # Apply patient filter (using User ID)
+        patient_id = request.query_params.get('patient_id')
+        if patient_id:
+            orders = orders.filter(patient_id=patient_id)
+        
+        # Apply search
+        search = request.query_params.get('search')
+        if search:
+            orders = orders.filter(
+                Q(patient__full_name__icontains=search) |
+                Q(test_type__name__icontains=search)
+            )
+        
+        # Count pending orders for notification
+        pending_count = orders.filter(status__in=['ORDERED', 'IN_PROGRESS']).count()
+        completed_count = orders.filter(status='COMPLETED').count()
+        
+        # Build response
+        order_list = []
+        for order in orders:
+            # Get PatientProfile for this user to get MRN
+            try:
+                patient_profile = PatientProfile.objects.get(user=order.patient)
+                patient_mrn = patient_profile.patient_id
+            except PatientProfile.DoesNotExist:
+                patient_mrn = f"P-{order.patient.id:05d}"
+            
+            # Get display fields for completed orders
+            display_fields = []
+            if order.status == 'COMPLETED' and order.field_values:
+                fields = order.test_type.fields.filter(is_active=True).order_by('display_order')
+                for field in fields:
+                    value = order.field_values.get(field.field_key)
+                    if value:
+                        display_fields.append({
+                            'label': field.label,
+                            'field_key': field.field_key,
+                            'value': value,
+                            'formatted_value': order._format_value(field, value) if hasattr(order, '_format_value') else value,
+                        })
+            
+            # Safely get status and priority displays
+            status_display = order.get_status_display() if hasattr(order, 'get_status_display') else order.status
+            priority_display = order.get_priority_display() if hasattr(order, 'get_priority_display') else order.priority
+            
+            order_list.append({
+                'id': order.id,
+                'patient': {
+                    'id': order.patient.id,
+                    'name': order.patient.full_name,
+                    'email': order.patient.email,
+                    'mrn': patient_mrn,
+                },
+                'test_type': {
+                    'id': order.test_type.id,
+                    'name': order.test_type.name,
+                    'code': order.test_type.code,
+                },
+                'test_date': order.test_date.strftime('%Y-%m-%d %H:%M') if order.test_date else None,
+                'status': order.status,
+                'status_display': status_display,
+                'priority': order.priority,
+                'priority_display': priority_display,
+                'field_values': order.field_values,
+                'display_fields': display_fields,
+                'notes': order.notes,
+                'ordered_by': order.created_by.full_name if order.created_by else None,
+                'created_at': order.created_at,
+                'updated_at': order.updated_at
+            })
+        
+        return Response({
+            'success': True,
+            'statistics': {
+                'total': len(order_list),
+                'pending': pending_count,
+                'completed': completed_count,
+            },
+            'orders': order_list
+        })
+    
+    def post(self, request):
+        """Order a new lab test - first tries PatientProfile ID, then User ID"""
+        doctor = request.user
+        from lab.models import LabTestType, LabRecord
+        from patients.models import PatientProfile
+        from accounts.models import User
+
+        # Get data
+        patient_id = request.data.get('patient_id')
+        test_type_id = request.data.get('test_type_id')
+        notes = request.data.get('notes', '')
+        priority = request.data.get('priority', 'ROUTINE')
+
+        # Validate
+        if not patient_id:
+            return Response({
+                'success': False,
+                'error': 'patient_id is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        if not test_type_id:
+            return Response({
+                'success': False,
+                'error': 'test_type_id is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+        # 1️⃣ FIRST: try as PatientProfile ID (most common for frontend)
+        patient = None
+        try:
+            patient_profile = PatientProfile.objects.get(id=patient_id)
+            patient = patient_profile.user
+        except PatientProfile.DoesNotExist:
+            # 2️⃣ SECOND: try as User ID
+            try:
+                patient = User.objects.get(id=patient_id)
+            except User.DoesNotExist:
+                return Response({
+                    'success': False,
+                    'error': f'Patient not found with ID: {patient_id}'
+                }, status=status.HTTP_404_NOT_FOUND)
+
+        # Get test type
+        try:
+            test_type = LabTestType.objects.get(id=test_type_id, is_active=True)
+        except LabTestType.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Test type not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+
+        # Create lab order
+        lab_record = LabRecord.objects.create(
+            patient=patient,
+            test_type=test_type,
+            test_date=timezone.now(),
+            status='ORDERED',
+            priority=priority,
+            field_values={},
+            notes=f"Ordered by Dr. {doctor.full_name}. {notes}",
+            created_by=doctor
+        )
+
+        # Safely get status and priority displays
+        status_display = lab_record.get_status_display() if hasattr(lab_record, 'get_status_display') else lab_record.status
+        priority_display = lab_record.get_priority_display() if hasattr(lab_record, 'get_priority_display') else priority
+
+        return Response({
+            'success': True,
+            'message': 'Lab test ordered successfully',
+            'order': {
+                'id': lab_record.id,
+                'test_name': test_type.name,
+                'test_code': test_type.code,
+                'patient_name': patient.full_name,
+                'patient_id': patient.id,
+                'status': lab_record.status,
+                'status_display': status_display,
+                'priority': priority,
+                'priority_display': priority_display,
+                'ordered_by': doctor.full_name,
+                'ordered_at': lab_record.created_at
+            }
+        }, status=status.HTTP_201_CREATED)
+    
+class DoctorLabOrderDetailView(APIView):
+    """
+    GET /api/doctor/lab-orders/{id}/
+    View lab order details with results
+    """
+    permission_classes = [IsAuthenticated, IsDoctor]
+    
+    def get(self, request, order_id):
+        doctor = request.user
+        from lab.models import LabRecord
+        from patients.models import PatientProfile
+        
+        try:
+            order = LabRecord.objects.get(id=order_id, is_active=True)
+        except LabRecord.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Order not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Verify patient belongs to this doctor
+        if not PatientProfile.objects.filter(
+            user=order.patient,
+            op_tickets__assigned_doctor=doctor
+        ).exists():
+            return Response({
+                'success': False,
+                'error': 'Access denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Get all fields for this test type
+        fields = order.test_type.fields.filter(is_active=True).order_by('display_order')
+        
+        # Build field values with metadata
+        field_data = []
+        for field in fields:
+            value = order.field_values.get(field.field_key)
+            field_data.append({
+                'id': field.id,
+                'label': field.label,
+                'field_key': field.field_key,
+                'field_type': field.field_type,
+                'value': value,
+                'formatted_value': order._format_value(field, value) if value else None,
+                'is_required': field.is_required,
+            })
+        
+        return Response({
+            'success': True,
+            'order': {
+                'id': order.id,
+                'patient': {
+                    'id': order.patient.id,
+                    'name': order.patient.full_name,
+                    'email': order.patient.email,
+                },
+                'test_type': {
+                    'id': order.test_type.id,
+                    'name': order.test_type.name,
+                    'code': order.test_type.code,
+                    'description': order.test_type.description,
+                },
+                'test_date': order.test_date.strftime('%Y-%m-%d %H:%M') if order.test_date else None,
+                'status': order.status,
+                'status_display': order.get_status_display(),
+                'priority': order.priority,
+                'priority_display': order.get_priority_display(),
+                'field_values': field_data,
+                'notes': order.notes,
+                'ordered_by': order.created_by.full_name if order.created_by else None,
+                'updated_by': order.updated_by.full_name if order.updated_by else None,
+                'created_at': order.created_at,
+                'updated_at': order.updated_at
+            }
         })

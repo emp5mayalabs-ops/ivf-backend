@@ -10,6 +10,9 @@ from .views import (
     DoctorLeaveBalanceView,DoctorMedicineInventoryView,
     DoctorCancelLeaveView,DoctorChangePasswordView,
     DoctorMedicineCategoriesView,
+    DoctorAvailableTestsView,
+    DoctorLabOrdersView,
+    DoctorLabOrderDetailView,
 )
 
 urlpatterns = [
@@ -51,4 +54,8 @@ urlpatterns = [
     path('medicines/<int:id>/', DoctorMedicineInventoryView.as_view(), name='doctor-medicine-detail'),
     path('medicines/categories/', DoctorMedicineCategoriesView.as_view(), name='doctor-medicine-categories'),
 
+        # ========== LAB INTEGRATION URLS ==========
+    path('available-tests/', DoctorAvailableTestsView.as_view(), name='doctor-available-tests'),
+    path('lab-orders/', DoctorLabOrdersView.as_view(), name='doctor-lab-orders'),
+    path('lab-orders/<int:order_id>/', DoctorLabOrderDetailView.as_view(), name='doctor-lab-order-detail'), 
 ]

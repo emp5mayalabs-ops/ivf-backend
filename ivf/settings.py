@@ -66,6 +66,10 @@ INSTALLED_APPS = [
     'telehealth',
     'apps.doctor',
     'attendance',
+    'nurse',
+    'embryology',
+    'andrology',  
+
     
 ]
 
@@ -191,7 +195,7 @@ CSRF_TRUSTED_ORIGINS = [
     'https://ivf-frontend.vercel.app',
     'https://w8wdjgw6-8000.inc1.devtunnels.ms'
     # 'https://ivf-backend-ki9p.onrender.com',
-    'https://ivf-frontend.vercel.app'
+    'https://ivf-frontend.vercel.app',
 ]
 
 
@@ -244,3 +248,4 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+   

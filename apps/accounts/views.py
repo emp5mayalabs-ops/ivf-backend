@@ -14,7 +14,7 @@ from django.contrib.auth import login,logout,authenticate
 from django.contrib.auth import update_session_auth_hash
 from django.middleware.csrf import get_token
 from django.urls import reverse_lazy,reverse
-from django.db.models import OuterRef,Subquery
+from django.db.models import OuterRef,Subquery, Q
 from django.utils import timezone
 from datetime import timedelta
 from django.db.models import Count
@@ -134,8 +134,8 @@ class ClinicLoginView(APIView):
                 'role':user.role,
                 'role_display':user.get_role_display(),
                 'has_changed_password':user.has_changed_password,
-	},
-	'redirect_url':get_role_redirect(user.role),
+            },
+            'redirect_url':get_role_redirect(user.role),
         },status=status.HTTP_200_OK)
 
     
@@ -163,7 +163,7 @@ class MeView(APIView):
                 'role':user.role,
                 'role_display':user.get_role_display(),
                 'has_changed_password':user.has_changed_password,
-	})
+        })
 
 
 class StaffManagementViewSet(viewsets.ModelViewSet):
@@ -179,6 +179,7 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return User.objects.exclude(role__in=['PAT','DON']).order_by('-date_joined')
+    
     def list(self,request,*args,**kwargs):
         return super().list(request,*args,**kwargs)
     
@@ -453,13 +454,9 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
                           fail_silently=True
                           )
 
-
-
     def create(self,request,*args,**kwargs):
         response=super().create(request,*args,**kwargs)
         return response
-
-
 
     @action(detail=False, methods=['get'], url_path='dashboard')
     def dashboard(self, request):
@@ -580,15 +577,10 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
                 'patient_today_count': patient_today_count,
                 'total_hods': len(hod_details),
             },
-    
             'department_heads': hod_details,
-    
             'role_distribution': role_distribution,
-    
             'active_sessions': active_sessions,
-    
             'patients': list(new_patients),
-    
             'top_departments': list(department_staff_count),
         })
 
@@ -715,3 +707,537 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
             for a in assignments
         ]
         return Response(data)
+
+    # ================================================================
+    # 🆕 STAFF DIRECTORY - For Receptionists
+    # ================================================================
+
+    # accounts/views.py - Inside StaffManagementViewSet
+
+@action(detail=False, methods=['get'], url_path='staff-directory', permission_classes=[IsAuthenticated])
+def staff_directory(self, request):
+    """
+    GET /api/accounts/staff-management/staff-directory/
+    GET /api/accounts/staff-management/staff-directory/?search=john
+    GET /api/accounts/staff-management/staff-directory/?role=GYN
+    GET /api/accounts/staff-management/staff-directory/?department=2
+    
+    
+    Receptionist can view all staff details (doctors, nurses, lab staff, etc.)
+    """
+    # Only receptionists can access this
+    if request.user.role != 'REC':
+        return Response({
+            'success': False,
+            'error': 'Access denied. Only receptionists can view staff directory.'
+        }, status=status.HTTP_403_FORBIDDEN)
+    
+    # Get query parameters
+    staff_id = request.query_params.get('id')
+    search = request.query_params.get('search', '').strip()
+    role_filter = request.query_params.get('role')
+    department_id = request.query_params.get('department')
+    is_active_filter = request.query_params.get('is_active')
+    
+    # ========== PAGINATION PARAMETERS ==========
+    page = int(request.query_params.get('page', 1))
+    page_size = int(request.query_params.get('page_size', 20))
+    
+    # Base queryset - exclude patients and donors
+    staff = User.objects.exclude(role__in=['PAT', 'DON'])
+    
+    # Filter by specific ID
+    if staff_id:
+        try:
+            staff = staff.filter(id=staff_id)
+        except ValueError:
+            return Response({
+                'success': False,
+                'error': 'Invalid staff ID'
+            }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Filter by search term (name or email)
+    if search:
+        staff = staff.filter(
+            Q(full_name__icontains=search) |
+            Q(email__icontains=search)
+        )
+    
+    # Filter by role
+    if role_filter:
+        staff = staff.filter(role=role_filter)
+    
+    # Filter by department
+    if department_id:
+        try:
+            department_id = int(department_id)
+            staff = staff.filter(
+                staff_assignments__department_id=department_id,
+                staff_assignments__is_active=True
+            ).distinct()
+        except ValueError:
+            return Response({
+                'success': False,
+                'error': 'Invalid department ID'
+            }, status=status.HTTP_400_BAD_REQUEST)
+    
+    # Filter by active status
+    if is_active_filter is not None:
+        is_active = is_active_filter.lower() == 'true'
+        staff = staff.filter(is_active=is_active)
+    
+    # Order by name
+    staff = staff.order_by('full_name')
+    
+    # ========== GET TOTAL COUNT BEFORE PAGINATION ==========
+    total = staff.count()
+    
+    # ========== APPLY PAGINATION ==========
+    start = (page - 1) * page_size
+    end = start + page_size
+    paginated_staff = staff[start:end]
+    
+    # ========== CALCULATE TOTAL PAGES ==========
+    total_pages = (total + page_size - 1) // page_size if page_size > 0 else 1
+    
+    # Build response data with full details
+    staff_data = []
+    for person in paginated_staff:
+        # Get primary department assignment
+        primary_dept = person.staff_assignments.filter(
+            role_in_dept='PRIMARY',
+            is_active=True
+        ).select_related('department').first()
+        
+        # Get all department assignments
+        all_depts = person.staff_assignments.filter(
+            is_active=True
+        ).select_related('department')
+        department_names = [dept.department.name for dept in all_depts if dept.department]
+        
+        # Get role-specific profile data
+        profile_data = self._get_role_profile(person)
+        
+        staff_data.append({
+            'id': person.id,
+            'full_name': person.full_name,
+            'email': person.email,
+            'role': person.role,
+            'role_display': person.get_role_display(),
+            'is_active': person.is_active,
+            'primary_department': {
+                'id': primary_dept.department.id if primary_dept else None,
+                'name': primary_dept.department.name if primary_dept else None,
+                'code': primary_dept.department.code if primary_dept else None,
+            } if primary_dept else None,
+            'departments': department_names,
+            'profile': profile_data,
+            'date_joined': person.date_joined.strftime('%Y-%m-%d') if person.date_joined else None,
+            'last_login': person.last_login.strftime('%Y-%m-%d %H:%M') if person.last_login else None,
+        })
+    
+    # Get role counts for summary (based on filtered results)
+    role_counts = {}
+    for person in staff:
+        role_counts[person.role] = role_counts.get(person.role, 0) + 1
+    
+    # Get department counts for summary (based on filtered results)
+    dept_counts = {}
+    for person in staff:
+        for dept in person.staff_assignments.filter(is_active=True).select_related('department'):
+            dept_name = dept.department.name
+            dept_counts[dept_name] = dept_counts.get(dept_name, 0) + 1
+    
+    return Response({
+        'success': True,
+        'total': total,
+        'page': page,
+        'page_size': page_size,
+        'total_pages': total_pages,
+        'role_counts': role_counts,
+        'department_counts': dept_counts,
+        'staff': staff_data
+    }, status=status.HTTP_200_OK)
+
+    # ================================================================
+    # 🆕 STAFF DETAIL - Get Individual Staff Details
+    # ================================================================
+
+    @action(detail=True, methods=['get'], url_path='staff-detail', permission_classes=[IsAuthenticated])
+    def staff_detail(self, request, pk=None):
+        """
+        GET /api/accounts/staff-management/{id}/staff-detail/
+        Get complete details of a single staff member by ID
+        
+        Response includes:
+        - Personal information
+        - Role-specific profile
+        - Department assignments
+        - Permissions
+        - Statistics
+        """
+        # Only receptionists can access this
+        if request.user.role != 'REC':
+            return Response({
+                'success': False,
+                'error': 'Access denied. Only receptionists can view staff details.'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            staff = User.objects.get(id=pk)
+        except User.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Staff member not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get primary department assignment
+        primary_dept = staff.staff_assignments.filter(
+            role_in_dept='PRIMARY',
+            is_active=True
+        ).select_related('department').first()
+        
+        # Get all department assignments
+        all_depts = staff.staff_assignments.filter(
+            is_active=True
+        ).select_related('department')
+        department_names = [dept.department.name for dept in all_depts if dept.department]
+        
+        # Get role-specific profile data
+        profile_data = self._get_role_profile(staff)
+        
+        # Get permissions and statistics
+        permissions_data = self._get_staff_permissions(staff)
+        statistics_data = self._get_staff_statistics(staff)
+        
+        # Build complete staff details
+        staff_data = {
+            'id': staff.id,
+            'full_name': staff.full_name,
+            'email': staff.email,
+            'role': staff.role,
+            'role_display': staff.get_role_display(),
+            'is_active': staff.is_active,
+            'date_joined': staff.date_joined.strftime('%Y-%m-%d') if staff.date_joined else None,
+            'last_login': staff.last_login.strftime('%Y-%m-%d %H:%M:%S') if staff.last_login else None,
+            'primary_department': {
+                'id': primary_dept.department.id if primary_dept else None,
+                'name': primary_dept.department.name if primary_dept else None,
+                'code': primary_dept.department.code if primary_dept else None,
+            } if primary_dept else None,
+            'departments': department_names,
+            'profile': profile_data,
+            'permissions': permissions_data,
+            'statistics': statistics_data,
+        }
+        
+        return Response({
+            'success': True,
+            'staff': staff_data
+        }, status=status.HTTP_200_OK)
+
+    def _get_role_profile(self, user):
+        """Helper method to get role-specific profile data"""
+        profile_data = {}
+        
+        # Doctor roles (END, GYN, ANE)
+        if user.role == 'END' and hasattr(user, 'endocrinologist_profile'):
+            prof = user.endocrinologist_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'specialization': getattr(prof, 'specialization', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_perform_egg_retrieval': getattr(prof, 'can_perform_egg_retrieval', False),
+                'can_perform_embryo_transfer': getattr(prof, 'can_perform_embryo_transfer', False),
+                'can_design_ivf_protocols': getattr(prof, 'can_design_ivf_protocols', False),
+            }
+        
+        elif user.role == 'GYN' and hasattr(user, 'gynaec_profile'):
+            prof = user.gynaec_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'specialization': getattr(prof, 'specialization', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_perform_egg_retrieval': getattr(prof, 'can_perform_egg_retrieval', False),
+                'can_assist_ivf': getattr(prof, 'can_assist_ivf', False),
+            }
+        
+        elif user.role == 'ANE' and hasattr(user, 'anesth_profile'):
+            prof = user.anesth_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'specialization': getattr(prof, 'specialization', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_edit_anesthesia_records': getattr(prof, 'can_edit_anesthesia_records', False),
+            }
+        
+        # Lab roles (EMB, TEC, AND)
+        elif user.role == 'EMB' and hasattr(user, 'embryologist_profile'):
+            prof = user.embryologist_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'specialization': getattr(prof, 'specialization', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_perform_icsi': getattr(prof, 'can_perform_icsi', False),
+                'can_perform_biopsy': getattr(prof, 'can_perform_biopsy', False),
+                'years_of_experience': getattr(prof, 'years_of_experience', 0),
+            }
+        
+        elif user.role == 'TEC' and hasattr(user, 'technician_profile'):
+            prof = user.technician_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'specialization': getattr(prof, 'specialization', ''),
+                'technical_certification': getattr(prof, 'technical_certification', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+            }
+        
+        elif user.role == 'AND' and hasattr(user, 'andrology_technician_profile'):
+            prof = user.andrology_technician_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'specialization': getattr(prof, 'specialization', ''),
+                'technician_license': getattr(prof, 'technician_license', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_perform_dna_frag': getattr(prof, 'can_perform_dna_frag', False),
+                'can_perform_cryo': getattr(prof, 'can_perform_cryo', False),
+            }
+        
+        # Nursing role
+        elif user.role == 'NUR' and hasattr(user, 'nurse_profile'):
+            prof = user.nurse_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'specialization': getattr(prof, 'specialization', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'is_head_nurse': getattr(prof, 'is_head_nurse', False),
+            }
+        
+        # Pharmacy role
+        elif user.role == 'PHA' and hasattr(user, 'pharmacist_profile'):
+            prof = user.pharmacist_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'license_number': getattr(prof, 'license_number', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_manage_inventory': getattr(prof, 'can_manage_inventory', False),
+            }
+        
+        # HR role
+        elif user.role == 'HRM' and hasattr(user, 'hr_profile'):
+            prof = user.hr_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_approve_leaves': getattr(prof, 'can_approve_leaves', False),
+                'can_view_salaries': getattr(prof, 'can_view_salaries', False),
+                'managed_depts': getattr(prof, 'managed_depts', ''),
+            }
+        
+        # Receptionist role
+        elif user.role == 'REC' and hasattr(user, 'receptionist_profile'):
+            prof = user.receptionist_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_register_patient': getattr(prof, 'can_register_patient', False),
+                'can_schedule_appointment': getattr(prof, 'can_schedule_appointment', False),
+                'can_access_billing': getattr(prof, 'can_access_billing', False),
+            }
+        
+        # Counsellor roles
+        elif user.role == 'CCO' and hasattr(user, 'clinical_counsellor_profile'):
+            prof = user.clinical_counsellor_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'specialization': getattr(prof, 'specialization', ''),
+            }
+        
+        elif user.role == 'FCO' and hasattr(user, 'financial_counsellor_profile'):
+            prof = user.financial_counsellor_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_approve_discounts': getattr(prof, 'can_approve_discounts', False),
+                'can_override_insurance': getattr(prof, 'can_override_insurance', False),
+            }
+        
+        # Admin role
+        elif user.role == 'ADM' and hasattr(user, 'admin_profile'):
+            prof = user.admin_profile
+            profile_data = {
+                'employee_id': getattr(prof, 'employee_id', ''),
+                'contact_number': getattr(prof, 'contact_number', ''),
+                'is_super_admin': getattr(prof, 'is_super_admin', False),
+            }
+        
+        return profile_data
+
+    # ================================================================
+    # 🆕 HELPER METHODS FOR STAFF DETAIL
+    # ================================================================
+
+    def _get_staff_permissions(self, user):
+        """Get role-specific permissions for a staff member"""
+        permissions = {
+            'is_department_head': False,
+            'can_manage_staff': False,
+            'can_view_reports': False,
+        }
+        
+        # HR permissions
+        if user.role == 'HRM' and hasattr(user, 'hr_profile'):
+            prof = user.hr_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_approve_leaves': getattr(prof, 'can_approve_leaves', False),
+                'can_view_salaries': getattr(prof, 'can_view_salaries', False),
+                'can_terminate_staff': getattr(prof, 'can_terminate_staff', False),
+                'can_edit_attendance': getattr(prof, 'can_edit_attendance', False),
+                'can_generate_payslips': getattr(prof, 'can_generate_payslips', False),
+                'can_update_documents': getattr(prof, 'can_update_documents', False),
+            })
+        
+        # Receptionist permissions
+        elif user.role == 'REC' and hasattr(user, 'receptionist_profile'):
+            prof = user.receptionist_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_register_patient': getattr(prof, 'can_register_patient', False),
+                'can_access_billing': getattr(prof, 'can_access_billing', False),
+                'can_modify_patient_records': getattr(prof, 'can_modify_patient_records', False),
+                'can_schedule_appointment': getattr(prof, 'can_schedule_appointment', False),
+            })
+        
+        # Doctor permissions (END, GYN, ANE)
+        elif user.role == 'END' and hasattr(user, 'endocrinologist_profile'):
+            prof = user.endocrinologist_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_perform_egg_retrieval': getattr(prof, 'can_perform_egg_retrieval', False),
+                'can_perform_embryo_transfer': getattr(prof, 'can_perform_embryo_transfer', False),
+                'can_design_ivf_protocols': getattr(prof, 'can_design_ivf_protocols', False),
+            })
+        
+        elif user.role == 'GYN' and hasattr(user, 'gynaec_profile'):
+            prof = user.gynaec_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_perform_egg_retrieval': getattr(prof, 'can_perform_egg_retrieval', False),
+                'can_assist_ivf': getattr(prof, 'can_assist_ivf', False),
+            })
+        
+        elif user.role == 'ANE' and hasattr(user, 'anesth_profile'):
+            prof = user.anesth_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_edit_anesthesia_records': getattr(prof, 'can_edit_anesthesia_records', False),
+            })
+        
+        # Lab permissions (EMB, TEC, AND)
+        elif user.role == 'EMB' and hasattr(user, 'embryologist_profile'):
+            prof = user.embryologist_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_perform_icsi': getattr(prof, 'can_perform_icsi', False),
+                'can_perform_biopsy': getattr(prof, 'can_perform_biopsy', False),
+                'can_perform_embryo_biopsy': getattr(prof, 'can_perform_embryo_biopsy', False),
+                'can_handle_cryo': getattr(prof, 'can_handle_cryo', False),
+            })
+        
+        elif user.role == 'TEC' and hasattr(user, 'technician_profile'):
+            prof = user.technician_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+            })
+        
+        elif user.role == 'AND' and hasattr(user, 'andrology_technician_profile'):
+            prof = user.andrology_technician_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_perform_dna_frag': getattr(prof, 'can_perform_dna_frag', False),
+                'can_perform_cryo': getattr(prof, 'can_perform_cryo', False),
+            })
+        
+        # Nursing permissions
+        elif user.role == 'NUR' and hasattr(user, 'nurse_profile'):
+            prof = user.nurse_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'is_head_nurse': getattr(prof, 'is_head_nurse', False),
+            })
+        
+        # Pharmacy permissions
+        elif user.role == 'PHA' and hasattr(user, 'pharmacist_profile'):
+            prof = user.pharmacist_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_manage_inventory': getattr(prof, 'can_manage_inventory', False),
+            })
+        
+        # Admin permissions
+        elif user.role == 'ADM' and hasattr(user, 'admin_profile'):
+            prof = user.admin_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'is_super_admin': getattr(prof, 'is_super_admin', False),
+            })
+        
+        # Financial Counsellor
+        elif user.role == 'FCO' and hasattr(user, 'financial_counsellor_profile'):
+            prof = user.financial_counsellor_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+                'can_approve_discounts': getattr(prof, 'can_approve_discounts', False),
+                'can_override_insurance': getattr(prof, 'can_override_insurance', False),
+            })
+        
+        # Clinical Counsellor
+        elif user.role == 'CCO' and hasattr(user, 'clinical_counsellor_profile'):
+            prof = user.clinical_counsellor_profile
+            permissions.update({
+                'is_department_head': getattr(prof, 'is_department_head', False),
+            })
+        
+        return permissions
+
+    def _get_staff_statistics(self, user):
+        """Get statistics for a staff member"""
+        statistics = {
+            'total_appointments': 0,
+            'total_patients': 0,
+            'completed_consultations': 0,
+            'pending_consultations': 0,
+        }
+        
+        from appointments.models import Appointment, OPTicket
+        
+        # For doctors
+        if user.role in ['END', 'GYN', 'ANE']:
+            appointments = Appointment.objects.filter(doctor=user)
+            statistics['total_appointments'] = appointments.count()
+            statistics['completed_consultations'] = appointments.filter(status='COMPLETED').count()
+            statistics['pending_consultations'] = appointments.filter(status__in=['SCHEDULED', 'CONFIRMED']).count()
+            statistics['total_patients'] = PatientProfile.objects.filter(
+                op_tickets__assigned_doctor=user
+            ).distinct().count()
+        
+        # For receptionists and nurses
+        if user.role in ['REC', 'NUR']:
+            tickets = OPTicket.objects.filter(created_by=user)
+            statistics['total_appointments'] = tickets.count()
+            statistics['pending_consultations'] = tickets.filter(status='WAITING').count()
+            statistics['completed_consultations'] = tickets.filter(status='DONE').count()
+        
+        return statistics

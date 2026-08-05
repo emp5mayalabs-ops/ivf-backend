@@ -1,4 +1,5 @@
-# apps/pharmacy/models.py
+# apps/pharmacy/models.py - COMPLETE WITH PRESCRIPTION MODELS
+
 from django.db import models
 from django.conf import settings
 from django.utils import timezone
@@ -42,7 +43,7 @@ class PharmacistProfile(models.Model):
         return "Pharmacist"
 
 
-# ========== NEW INVENTORY MODELS ==========
+# ========== INVENTORY MODELS ==========
 
 class MedicationCategory(models.Model):
     """Categories for medications"""
@@ -435,3 +436,323 @@ class StockAlert(models.Model):
             models.Index(fields=['alert_type']),
             models.Index(fields=['status']),
         ]
+
+
+# ========== NEW: PRESCRIPTION ORDER MODELS ==========
+
+class PrescriptionOrder(models.Model):
+    """
+    Model to track prescription orders from doctors to pharmacy
+    """
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending'),
+        ('PROCESSING', 'Processing'),
+        ('PARTIALLY_FULFILLED', 'Partially Fulfilled'),
+        ('FULFILLED', 'Fulfilled'),
+        ('OUT_OF_STOCK', 'Out of Stock'),
+        ('CANCELLED', 'Cancelled'),
+    ]
+    
+    order_id = models.CharField(max_length=20, unique=True, editable=False)
+    
+    # Link to the original prescription (from emr app)
+    prescription = models.OneToOneField(
+        'emr.Prescription',
+        on_delete=models.CASCADE,
+        related_name='pharmacy_order',
+        null=True,
+        blank=True
+    )
+    
+    # Patient and doctor info (denormalized for quick access)
+    patient = models.ForeignKey(
+        'patients.PatientProfile',
+        on_delete=models.CASCADE,
+        related_name='pharmacy_orders'
+    )
+    doctor = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='pharmacy_prescriptions',
+        null=True,
+        blank=True
+    )
+    
+    # Order details
+    medication_name = models.CharField(max_length=255)
+    requested_quantity = models.IntegerField(default=1)
+    fulfilled_quantity = models.IntegerField(default=0)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING')
+    
+    # Pharmacy processing
+    pharmacist = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='fulfilled_prescriptions'
+    )
+    fulfilled_at = models.DateTimeField(null=True, blank=True)
+    
+    # Links to inventory
+    medication = models.ForeignKey(
+        Medication,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='prescription_orders'
+    )
+    
+    # Notes
+    notes = models.TextField(blank=True)
+    pharmacist_notes = models.TextField(blank=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def save(self, *args, **kwargs):
+        if not self.order_id:
+            year = timezone.now().strftime('%Y')
+            last = PrescriptionOrder.objects.filter(
+                order_id__startswith=f'ORD-{year}'
+            ).count()
+            self.order_id = f'ORD-{year}{str(last + 1).zfill(6)}'
+        super().save(*args, **kwargs)
+    
+    class Meta:
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['status', 'created_at']),
+            models.Index(fields=['patient', 'status']),
+            models.Index(fields=['doctor', 'status']),
+            models.Index(fields=['order_id']),
+        ]
+    
+    def __str__(self):
+        return f"Order #{self.order_id} - {self.medication_name} ({self.get_status_display()})"
+    
+    def get_status_display(self):
+        """Get human-readable status"""
+        status_map = dict(self.STATUS_CHOICES)
+        return status_map.get(self.status, self.status)
+    
+    def is_fully_fulfilled(self):
+        """Check if order is fully fulfilled"""
+        return self.fulfilled_quantity >= self.requested_quantity
+    
+    def is_partially_fulfilled(self):
+        """Check if order is partially fulfilled"""
+        return 0 < self.fulfilled_quantity < self.requested_quantity
+    
+    def get_remaining_quantity(self):
+        """Get remaining quantity to fulfill"""
+        return max(0, self.requested_quantity - self.fulfilled_quantity)
+    
+    def can_fulfill(self, quantity=None):
+        """Check if we can fulfill the requested quantity"""
+        if quantity is None:
+            quantity = self.get_remaining_quantity()
+        
+        if not self.medication:
+            return False, "Medication not linked to inventory"
+        
+        if not self.medication.is_active:
+            return False, "Medication is not active"
+        
+        if self.medication.current_stock <= 0:
+            return False, "Out of stock"
+        
+        if self.medication.current_stock < quantity:
+            return False, f"Only {self.medication.current_stock} units available"
+        
+        return True, "Available"
+    
+    def fulfill(self, quantity=None, pharmacist=None):
+        """
+        Fulfill the prescription order
+        Args:
+            quantity: Number of units to fulfill (default: remaining quantity)
+            pharmacist: User object of the pharmacist fulfilling
+        Returns:
+            self: Updated order object
+        Raises:
+            ValueError: If fulfillment is not possible
+        """
+        if quantity is None:
+            quantity = self.get_remaining_quantity()
+        
+        if quantity <= 0:
+            raise ValueError("Quantity must be greater than 0")
+        
+        if self.status == 'FULFILLED':
+            raise ValueError("Order already fulfilled")
+        
+        if self.status == 'CANCELLED':
+            raise ValueError("Order has been cancelled")
+        
+        if self.status == 'OUT_OF_STOCK':
+            raise ValueError("Order is marked as out of stock")
+        
+        can_fulfill, message = self.can_fulfill(quantity)
+        if not can_fulfill:
+            raise ValueError(message)
+        
+        # Deduct from inventory
+        self.medication.current_stock -= quantity
+        self.medication.save()
+        
+        # Create stock adjustment record
+        StockAdjustment.objects.create(
+            medication=self.medication,
+            adjustment_type='DISPENSED',
+            quantity=quantity,
+            reason='DISPENSING',
+            reference=self.order_id,
+            notes=f"Fulfilled prescription order for patient {self.patient.user.full_name}",
+            performed_by=pharmacist or self.pharmacist
+        )
+        
+        # Update order
+        self.fulfilled_quantity += quantity
+        self.pharmacist = pharmacist
+        self.fulfilled_at = timezone.now()
+        
+        # Update status
+        if self.is_fully_fulfilled():
+            self.status = 'FULFILLED'
+        else:
+            self.status = 'PARTIALLY_FULFILLED'
+        
+        self.save()
+        
+        return self
+    
+    def mark_out_of_stock(self, pharmacist=None):
+        """Mark order as out of stock"""
+        self.status = 'OUT_OF_STOCK'
+        self.pharmacist = pharmacist
+        self.save()
+        return self
+    
+    def mark_cancelled(self, pharmacist=None):
+        """Mark order as cancelled"""
+        self.status = 'CANCELLED'
+        self.pharmacist = pharmacist
+        self.save()
+        return self
+    
+    def mark_processing(self, pharmacist=None):
+        """Mark order as processing"""
+        self.status = 'PROCESSING'
+        self.pharmacist = pharmacist
+        self.save()
+        return self
+
+# pharmacy/models.py – ADD AFTER PrescriptionOrder
+
+# ========== BILLING MODELS ==========
+
+class PharmacyBill(models.Model):
+    """Main Bill/Invoice for pharmacy sales"""
+    
+    PAYMENT_STATUS = [
+        ('PAID', 'Paid'),
+        ('PENDING', 'Pending'),
+        ('PARTIAL', 'Partially Paid'),
+        ('CANCELLED', 'Cancelled'),
+        ('REFUNDED', 'Refunded'),
+    ]
+    
+    patient = models.ForeignKey(
+        'patients.PatientProfile',
+        on_delete=models.CASCADE,
+        related_name='pharmacy_bills'
+    )
+    bill_number = models.CharField(max_length=50, unique=True, blank=True)
+    bill_date = models.DateTimeField(default=timezone.now)
+    
+    # Financials
+    subtotal = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    discount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    discount_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    tax = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    tax_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    
+    # Payment
+    payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS, default='PENDING')
+    payment_method = models.CharField(max_length=20, blank=True)
+    amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    balance_due = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    
+    # Reference to prescription order (optional)
+    prescription = models.ForeignKey(
+        PrescriptionOrder,  # ← Uses your existing model!
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='bills'
+    )
+    notes = models.TextField(blank=True)
+    
+    # Audit
+    created_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='pharmacy_bills_created'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def save(self, *args, **kwargs):
+        if not self.bill_number:
+            today = timezone.now().strftime('%Y%m%d')
+            import random
+            self.bill_number = f"PH-{today}-{random.randint(1000, 9999)}"
+        self.total = self.subtotal - self.discount + self.tax
+        self.balance_due = self.total - self.amount_paid
+        super().save(*args, **kwargs)
+    
+    class Meta:
+        db_table = 'pharmacy_bills'
+        ordering = ['-bill_date']
+
+
+class PharmacyBillItem(models.Model):
+    """Items in a bill"""
+    bill = models.ForeignKey(PharmacyBill, on_delete=models.CASCADE, related_name='items')
+    medication = models.ForeignKey(Medication, on_delete=models.CASCADE)
+    quantity = models.IntegerField(default=1)
+    unit_price = models.DecimalField(max_digits=10, decimal_places=2)
+    discount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    def save(self, *args, **kwargs):
+        self.total = (self.unit_price * self.quantity) - self.discount
+        super().save(*args, **kwargs)
+    
+    class Meta:
+        db_table = 'pharmacy_bill_items'
+
+
+class PharmacyPayment(models.Model):
+    """Payments against bills"""
+    bill = models.ForeignKey(PharmacyBill, on_delete=models.CASCADE, related_name='payments')
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    payment_method = models.CharField(max_length=20)  # CASH, CARD, INSURANCE, ONLINE
+    payment_date = models.DateTimeField(default=timezone.now)
+    transaction_id = models.CharField(max_length=100, blank=True)
+    notes = models.TextField(blank=True)
+    received_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='pharmacy_payments'
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'pharmacy_payments'
+        ordering = ['-payment_date']

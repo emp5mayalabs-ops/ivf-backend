@@ -1,4 +1,5 @@
-# apps/doctor/serializers.py
+# apps/doctor/serializers.py - COMPLETE WITH QUANTITY FIELD
+
 from rest_framework import serializers
 from django.utils import timezone
 from datetime import timedelta
@@ -197,15 +198,16 @@ class DoctorClinicalNoteSerializer(serializers.Serializer):
 
 
 class DoctorPrescriptionSerializer(serializers.Serializer):
-    """Serializer for creating prescriptions"""
+    """Serializer for creating prescriptions with pharmacy integration"""
     
     patient_id = serializers.IntegerField()
-    medication_name = serializers.CharField()
-    dosage = serializers.CharField()
-    frequency = serializers.CharField()
-    duration = serializers.CharField()
-    route = serializers.CharField()
+    medication_name = serializers.CharField(max_length=255)
+    dosage = serializers.CharField(max_length=100)
+    frequency = serializers.CharField(max_length=100)
+    duration = serializers.CharField(max_length=50)
+    route = serializers.CharField(max_length=50)
     instructions = serializers.CharField(required=False, allow_blank=True)
+    quantity = serializers.IntegerField(default=1, min_value=1, required=False)
     
     def validate_patient_id(self, value):
         try:
@@ -213,6 +215,32 @@ class DoctorPrescriptionSerializer(serializers.Serializer):
             return patient
         except PatientProfile.DoesNotExist:
             raise serializers.ValidationError("Patient not found")
+    
+    def validate_medication_name(self, value):
+        """Validate that medication name is provided"""
+        if not value or not value.strip():
+            raise serializers.ValidationError("Medication name is required")
+        return value.strip()
+    
+    def validate_dosage(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Dosage is required")
+        return value.strip()
+    
+    def validate_frequency(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Frequency is required")
+        return value.strip()
+    
+    def validate_duration(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Duration is required")
+        return value.strip()
+    
+    def validate_route(self, value):
+        if not value or not value.strip():
+            raise serializers.ValidationError("Route is required")
+        return value.strip()
 
 
 class DoctorStatsSerializer(serializers.Serializer):
