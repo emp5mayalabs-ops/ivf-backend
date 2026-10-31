@@ -1,11 +1,17 @@
+# lab/views.py - Complete with Billing Integration
+
+from datetime import timedelta
+
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from django.contrib.auth import login, logout
 from django.utils import timezone
-from django.db.models import Q
+from django.db.models import Q, Sum, Count, F
+from django.db import transaction
 from django.shortcuts import get_object_or_404
+from decimal import Decimal
 
 from .serializers import (
     LabLoginSerializer, 
@@ -19,13 +25,22 @@ from .serializers import (
     LabOrderSerializer,
     LabResultUpdateSerializer,
     LabOrderListSerializer,
+    # Billing serializers
+    LabBillSerializer,
+    LabBillListSerializer,
+    LabBillCreateSerializer,
+    LabPaymentSerializer,
 )
 from .models import (
     LabTechnicianProfile,
     AndrologyLabTechnician,
     LabTestType,
     LabField,
-    LabRecord
+    LabRecord,
+    # Billing models
+    LabBill,
+    LabBillItem,
+    LabPayment,
 )
 from accounts.models import LoginAuditLog
 from accounts.models import User
@@ -118,14 +133,12 @@ class LabLogoutView(APIView):
     permission_classes = [IsAuthenticated]
     
     def post(self, request):
-        # Check lab role
         if not check_lab_access(request.user):
             return Response({
                 'success': False,
                 'error': 'Access denied'
             }, status=status.HTTP_403_FORBIDDEN)
         
-        # Update login audit log
         try:
             LoginAuditLog.objects.filter(
                 user=request.user,
@@ -156,10 +169,8 @@ class LabProfileView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-        """Get current lab profile"""
         user = request.user
         
-        # Check lab role
         if not check_lab_access(user):
             return Response({
                 'success': False,
@@ -180,10 +191,8 @@ class LabProfileView(APIView):
         }, status=status.HTTP_200_OK)
     
     def put(self, request):
-        """Update current lab profile"""
         user = request.user
         
-        # Check lab role
         if not check_lab_access(user):
             return Response({
                 'success': False,
@@ -197,7 +206,6 @@ class LabProfileView(APIView):
                 'error': 'Profile not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Handle password change
         if 'new_password' in request.data:
             old_password = request.data.get('old_password')
             new_password = request.data.get('new_password')
@@ -228,7 +236,6 @@ class LabProfileView(APIView):
                 'message': 'Password updated successfully'
             }, status=status.HTTP_200_OK)
         
-        # Update profile
         serializer = LabProfileUpdateSerializer(
             lab_profile,
             data=request.data,
@@ -250,10 +257,8 @@ class LabProfileView(APIView):
         }, status=status.HTTP_400_BAD_REQUEST)
     
     def delete(self, request):
-        """Delete/Deactivate current lab profile"""
         user = request.user
         
-        # Check lab role
         if not check_lab_access(user):
             return Response({
                 'success': False,
@@ -267,13 +272,11 @@ class LabProfileView(APIView):
                 'error': 'Profile not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Soft delete - deactivate user and profile
         user.is_active = False
         user.save()
         lab_profile.is_active = False
         lab_profile.save()
         
-        # Logout the user
         logout(request)
         
         return Response({
@@ -290,10 +293,7 @@ class LabProfileDetailView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request, lab_id):
-        """Get lab profile by ID (for admin/head)"""
-        # Only admins or head can view other profiles
         if request.user.role not in ['ADM']:
-            # Allow viewing own profile through the main endpoint
             if request.user.id != lab_id:
                 return Response({
                     'success': False,
@@ -322,8 +322,6 @@ class LabProfileDetailView(APIView):
         }, status=status.HTTP_200_OK)
     
     def delete(self, request, lab_id):
-        """Delete lab profile by ID (Admin only)"""
-        # Only admins can delete other profiles
         if request.user.role != 'ADM':
             return Response({
                 'success': False,
@@ -345,7 +343,6 @@ class LabProfileDetailView(APIView):
                 'error': 'Profile not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Soft delete
         user.is_active = False
         user.save()
         lab_profile.is_active = False
@@ -357,9 +354,7 @@ class LabProfileDetailView(APIView):
         }, status=status.HTTP_200_OK)
 
 
-# ========== NEW DYNAMIC LAB TESTS VIEWS ==========
-
-# lab/views.py - UPDATED LabTestTypeListView
+# ========== LAB TEST TYPES VIEWS ==========
 
 class LabTestTypeListView(APIView):
     """
@@ -371,10 +366,8 @@ class LabTestTypeListView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-        """Get all active test types"""
         test_types = LabTestType.objects.filter(is_active=True)
         
-        # Filter by search
         search = request.query_params.get('search')
         if search:
             test_types = test_types.filter(
@@ -383,11 +376,9 @@ class LabTestTypeListView(APIView):
                 Q(description__icontains=search)
             )
         
-        # ========== 🆕 CHECK FOR SIMPLE RESPONSE ==========
         simple = request.query_params.get('simple', '').lower() == 'true'
         
         if simple:
-            # Lightweight response for dropdowns (receptionist, doctor, etc.)
             data = [{
                 'id': test.id,
                 'name': test.name,
@@ -395,6 +386,7 @@ class LabTestTypeListView(APIView):
                 'icon': test.icon,
                 'color': test.color,
                 'description': test.description,
+                'price': float(test.price) if test.price else 0,
             } for test in test_types]
             return Response({
                 'success': True,
@@ -402,7 +394,6 @@ class LabTestTypeListView(APIView):
                 'test_types': data
             }, status=status.HTTP_200_OK)
         
-        # Full response with fields (for admin/lab management)
         serializer = LabTestTypeSerializer(test_types, many=True)
         return Response({
             'success': True,
@@ -411,8 +402,6 @@ class LabTestTypeListView(APIView):
         }, status=status.HTTP_200_OK)
     
     def post(self, request):
-        """Create new test type"""
-        # Check if user has permission (Admin or Lab Head)
         if request.user.role not in ['ADM'] and not request.user.is_superuser:
             return Response({
                 'success': False,
@@ -447,7 +436,6 @@ class LabTestTypeDetailView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request, test_type_id):
-        """Get test type details with fields"""
         try:
             test_type = LabTestType.objects.get(id=test_type_id, is_active=True)
         except LabTestType.DoesNotExist:
@@ -463,8 +451,6 @@ class LabTestTypeDetailView(APIView):
         }, status=status.HTTP_200_OK)
     
     def put(self, request, test_type_id):
-        """Update test type"""
-        # Check permission
         if request.user.role not in ['ADM'] and not request.user.is_superuser:
             return Response({
                 'success': False,
@@ -499,8 +485,6 @@ class LabTestTypeDetailView(APIView):
         }, status=status.HTTP_400_BAD_REQUEST)
     
     def delete(self, request, test_type_id):
-        """Delete test type (soft delete)"""
-        # Check permission
         if request.user.role not in ['ADM'] and not request.user.is_superuser:
             return Response({
                 'success': False,
@@ -524,6 +508,8 @@ class LabTestTypeDetailView(APIView):
         }, status=status.HTTP_200_OK)
 
 
+# ========== LAB RECORD VIEWS ==========
+
 class LabRecordListView(APIView):
     """
     GET /api/lab/records/ - List all lab records
@@ -532,8 +518,6 @@ class LabRecordListView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-        """Get lab records with filters"""
-        # Check lab access
         if not check_lab_access(request.user) and request.user.role != 'ADM':
             return Response({
                 'success': False,
@@ -542,17 +526,14 @@ class LabRecordListView(APIView):
         
         records = LabRecord.objects.filter(is_active=True)
         
-        # Filter by test type
         test_type = request.query_params.get('test_type')
         if test_type:
             records = records.filter(test_type_id=test_type)
         
-        # Filter by patient
         patient = request.query_params.get('patient')
         if patient:
             records = records.filter(patient_id=patient)
         
-        # Filter by date range
         date_from = request.query_params.get('date_from')
         date_to = request.query_params.get('date_to')
         if date_from:
@@ -560,12 +541,10 @@ class LabRecordListView(APIView):
         if date_to:
             records = records.filter(test_date__lte=date_to)
         
-        # Filter by status
         status_filter = request.query_params.get('status')
         if status_filter:
             records = records.filter(status=status_filter)
         
-        # Search
         search = request.query_params.get('search')
         if search:
             records = records.filter(
@@ -574,11 +553,9 @@ class LabRecordListView(APIView):
                 Q(notes__icontains=search)
             )
         
-        # Ordering
         ordering = request.query_params.get('ordering', '-test_date')
         records = records.order_by(ordering)
         
-        # Pagination
         page = int(request.query_params.get('page', 1))
         page_size = int(request.query_params.get('page_size', 20))
         start = (page - 1) * page_size
@@ -599,8 +576,6 @@ class LabRecordListView(APIView):
         }, status=status.HTTP_200_OK)
     
     def post(self, request):
-        """Create new lab record"""
-        # Check lab access
         if not check_lab_access(request.user):
             return Response({
                 'success': False,
@@ -635,8 +610,6 @@ class LabRecordDetailView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request, record_id):
-        """Get record details"""
-        # Check lab access
         if not check_lab_access(request.user) and request.user.role != 'ADM':
             return Response({
                 'success': False,
@@ -658,8 +631,6 @@ class LabRecordDetailView(APIView):
         }, status=status.HTTP_200_OK)
     
     def put(self, request, record_id):
-        """Update record"""
-        # Check lab access
         if not check_lab_access(request.user):
             return Response({
                 'success': False,
@@ -694,8 +665,6 @@ class LabRecordDetailView(APIView):
         }, status=status.HTTP_400_BAD_REQUEST)
     
     def delete(self, request, record_id):
-        """Delete record (soft delete)"""
-        # Check lab access
         if not check_lab_access(request.user):
             return Response({
                 'success': False,
@@ -726,8 +695,6 @@ class LabRecordsByPatientView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request, patient_id):
-        """Get all records for a specific patient"""
-        # Check lab access
         if not check_lab_access(request.user) and request.user.role != 'ADM':
             return Response({
                 'success': False,
@@ -764,8 +731,6 @@ class LabStatisticsView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-        """Get lab statistics"""
-        # Check lab access
         if not check_lab_access(request.user) and request.user.role != 'ADM':
             return Response({
                 'success': False,
@@ -775,7 +740,6 @@ class LabStatisticsView(APIView):
         total_records = LabRecord.objects.filter(is_active=True).count()
         total_test_types = LabTestType.objects.filter(is_active=True).count()
         
-        # Records by status
         records_by_status = {}
         for status_choice in LabRecord.STATUS_CHOICES:
             status_code = status_choice[0]
@@ -783,7 +747,6 @@ class LabStatisticsView(APIView):
             if count > 0:
                 records_by_status[status_code] = count
         
-        # Records by test type
         records_by_test_type = []
         test_types = LabTestType.objects.filter(is_active=True)
         for test_type in test_types:
@@ -795,7 +758,6 @@ class LabStatisticsView(APIView):
                     'count': count
                 })
         
-        # Recent records
         recent_records = LabRecord.objects.filter(is_active=True).order_by('-test_date')[:10]
         recent_data = LabRecordSerializer(recent_records, many=True).data
         
@@ -821,7 +783,6 @@ class LabOrderCreateView(APIView):
     permission_classes = [IsAuthenticated]
     
     def post(self, request):
-        # Allow doctors AND receptionists
         if request.user.role not in ['END', 'GYN', 'ANE', 'REC']:
             return Response({
                 'success': False,
@@ -840,30 +801,24 @@ class LabOrderCreateView(APIView):
         notes = serializer.validated_data.get('notes', '')
         priority = serializer.validated_data.get('priority', 'ROUTINE')
         
-        # ========== 🆕 FIND PATIENT: PatientProfile ID first, then User ID ==========
         patient = None
         patient_name = None
         
-        # 1️⃣ FIRST: try as PatientProfile ID
         try:
             from patients.models import PatientProfile
             patient_profile = PatientProfile.objects.get(id=patient_id)
             patient = patient_profile.user
             patient_name = patient_profile.user.full_name
-            print(f"✅ Found patient via PatientProfile ID: {patient_id} → {patient_name}")
         except PatientProfile.DoesNotExist:
-            # 2️⃣ SECOND: try as User ID
             try:
                 patient = User.objects.get(id=patient_id)
                 patient_name = patient.full_name
-                print(f"✅ Found patient via User ID: {patient_id} → {patient_name}")
             except User.DoesNotExist:
                 return Response({
                     'success': False,
                     'error': f'Patient not found with ID: {patient_id}'
                 }, status=status.HTTP_404_NOT_FOUND)
         
-        # Get test type
         try:
             test_type = LabTestType.objects.get(id=test_type_id, is_active=True)
         except LabTestType.DoesNotExist:
@@ -872,7 +827,6 @@ class LabOrderCreateView(APIView):
                 'error': 'Test type not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Create lab record with ORDERED status (token auto‑generated)
         lab_record = LabRecord.objects.create(
             patient=patient,
             test_type=test_type,
@@ -884,7 +838,6 @@ class LabOrderCreateView(APIView):
             created_by=request.user
         )
         
-        # Return response WITH token_number and correct patient name
         return Response({
             'success': True,
             'message': 'Lab test ordered successfully',
@@ -893,8 +846,8 @@ class LabOrderCreateView(APIView):
                 'token_number': lab_record.token_number,
                 'test_name': test_type.name,
                 'test_code': test_type.code,
-                'patient_name': patient.full_name,  # ✅ Correct patient name
-                'patient_id': patient.id,           # ✅ User ID
+                'patient_name': patient.full_name,
+                'patient_id': patient.id,
                 'status': lab_record.status,
                 'status_display': lab_record.get_status_display(),
                 'priority': priority,
@@ -915,7 +868,6 @@ class LabOrderListView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request):
-        # Allowed roles: lab techs, admin, doctors, receptionists
         if request.user.role not in ['TEC', 'AND', 'EMB', 'ADM', 'END', 'GYN', 'ANE', 'REC']:
             return Response({
                 'success': False,
@@ -929,7 +881,6 @@ class LabOrderListView(APIView):
         
         orders = LabRecord.objects.filter(is_active=True)
         
-        # If doctor, only show orders for their patients
         if request.user.role in ['END', 'GYN', 'ANE']:
             from patients.models import PatientProfile
             doctor_patients = PatientProfile.objects.filter(
@@ -937,9 +888,6 @@ class LabOrderListView(APIView):
             ).values_list('user_id', flat=True)
             orders = orders.filter(patient_id__in=doctor_patients)
         
-        # Receptionists see all orders (no restriction)
-        
-        # Apply filters
         if patient_id:
             orders = orders.filter(patient_id=patient_id)
         if status_filter:
@@ -951,10 +899,8 @@ class LabOrderListView(APIView):
         
         orders = orders.order_by('-created_at')
         
-        # Serialize (LabOrderListSerializer includes token_number)
         serializer = LabOrderListSerializer(orders, many=True)
         
-        # Get counts for statistics
         pending_count = orders.filter(status='ORDERED').count()
         in_progress_count = orders.filter(status='IN_PROGRESS').count()
         completed_count = orders.filter(status='COMPLETED').count()
@@ -981,7 +927,6 @@ class LabOrderDetailView(APIView):
     permission_classes = [IsAuthenticated]
     
     def get(self, request, order_id):
-        """Get order details"""
         try:
             order = LabRecord.objects.get(id=order_id, is_active=True)
         except LabRecord.DoesNotExist:
@@ -990,7 +935,6 @@ class LabOrderDetailView(APIView):
                 'error': 'Order not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Check access
         if request.user.role in ['END', 'GYN', 'ANE']:
             from patients.models import PatientProfile
             if not PatientProfile.objects.filter(
@@ -1007,10 +951,8 @@ class LabOrderDetailView(APIView):
                 'error': 'Access denied'
             }, status=status.HTTP_403_FORBIDDEN)
         
-        # Get all fields for this test type
         fields = order.test_type.fields.filter(is_active=True).order_by('display_order')
         
-        # Build field values with metadata
         field_data = []
         for field in fields:
             field_data.append({
@@ -1029,7 +971,7 @@ class LabOrderDetailView(APIView):
             'success': True,
             'order': {
                 'id': order.id,
-                'token_number': order.token_number,  # 🆕 token included
+                'token_number': order.token_number,
                 'patient': {
                     'id': order.patient.id,
                     'name': order.patient.full_name,
@@ -1040,6 +982,7 @@ class LabOrderDetailView(APIView):
                     'name': order.test_type.name,
                     'code': order.test_type.code,
                     'description': order.test_type.description,
+                    'price': float(order.test_type.price) if order.test_type.price else 0,
                     'fields': field_data,
                 },
                 'test_date': order.test_date,
@@ -1056,8 +999,6 @@ class LabOrderDetailView(APIView):
         })
     
     def put(self, request, order_id):
-        """Update with results - Lab only"""
-        # Only lab technicians can update results
         if request.user.role not in ['TEC', 'AND', 'EMB', 'ADM']:
             return Response({
                 'success': False,
@@ -1072,19 +1013,16 @@ class LabOrderDetailView(APIView):
                 'error': 'Order not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # Check if order can be updated
         if order.status in ['COMPLETED', 'CANCELLED']:
             return Response({
                 'success': False,
                 'error': f'Cannot update order in {order.status} status'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # Update with results
         field_values = request.data.get('field_values', {})
         notes = request.data.get('notes')
         status_update = request.data.get('status', 'COMPLETED')
         
-        # Merge field values
         if field_values:
             if order.field_values:
                 order.field_values.update(field_values)
@@ -1100,7 +1038,6 @@ class LabOrderDetailView(APIView):
         order.status = status_update
         order.updated_by = request.user
         
-        # If completed, update test_date
         if status_update == 'COMPLETED':
             order.test_date = timezone.now()
         
@@ -1129,7 +1066,6 @@ class LabOrderCancelView(APIView):
     permission_classes = [IsAuthenticated]
     
     def post(self, request, order_id):
-        """Cancel a lab order"""
         try:
             order = LabRecord.objects.get(id=order_id, is_active=True)
         except LabRecord.DoesNotExist:
@@ -1138,10 +1074,8 @@ class LabOrderCancelView(APIView):
                 'error': 'Order not found'
             }, status=status.HTTP_404_NOT_FOUND)
         
-        # ========== CHECK PERMISSIONS ==========
         user_role = request.user.role
         
-        # Case 1: Doctors can cancel their own orders
         if user_role in ['END', 'GYN', 'ANE']:
             if order.created_by != request.user:
                 from patients.models import PatientProfile
@@ -1153,32 +1087,22 @@ class LabOrderCancelView(APIView):
                         'success': False,
                         'error': 'Access denied. You can only cancel orders for your patients.'
                     }, status=status.HTTP_403_FORBIDDEN)
-        
-        # 🆕 Case 2: Receptionists can cancel any order
         elif user_role == 'REC':
-            # Receptionists have full permission to cancel any order
             pass
-        
-        # Case 3: Lab staff and admins can cancel any order
         elif user_role in ['TEC', 'AND', 'EMB', 'ADM']:
-            # Lab staff and admins can cancel any order
             pass
-        
-        # Case 4: All other roles are denied
         else:
             return Response({
                 'success': False,
                 'error': 'Access denied. You do not have permission to cancel orders.'
             }, status=status.HTTP_403_FORBIDDEN)
         
-        # ========== CHECK ORDER STATUS ==========
         if order.status in ['COMPLETED', 'CANCELLED']:
             return Response({
                 'success': False,
                 'error': f'Cannot cancel order in "{order.get_status_display()}" status'
             }, status=status.HTTP_400_BAD_REQUEST)
         
-        # ========== CANCEL THE ORDER ==========
         order.status = 'CANCELLED'
         order.updated_by = request.user
         order.save()
@@ -1188,10 +1112,560 @@ class LabOrderCancelView(APIView):
             'message': 'Order cancelled successfully',
             'order': {
                 'id': order.id,
-                'token_number': order.token_number,  # 🆕 Include token for reference
+                'token_number': order.token_number,
                 'status': order.status,
                 'status_display': order.get_status_display(),
                 'cancelled_by': request.user.full_name,
                 'cancelled_at': order.updated_at
             }
+        })
+
+
+# ============================================================
+# 🆕 LAB BILLING VIEWS
+# ============================================================
+
+class LabBillListView(APIView):
+    """
+    GET /api/lab/bills/ - List all lab bills
+    POST /api/lab/bills/ - Create new lab bill & push to Finance
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        """List all lab bills with filters"""
+        if not check_lab_access(request.user) and request.user.role not in ['ADM', 'REC']:
+            return Response({
+                'success': False,
+                'error': 'Access denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        bills = LabBill.objects.select_related(
+            'patient__user', 'created_by'
+        ).prefetch_related('items__test_type', 'payments').all()
+        
+        # Filters
+        status_filter = request.query_params.get('status')
+        if status_filter:
+            bills = bills.filter(payment_status=status_filter)
+        
+        patient_id = request.query_params.get('patient')
+        if patient_id:
+            bills = bills.filter(patient_id=patient_id)
+        
+        search = request.query_params.get('search')
+        if search:
+            bills = bills.filter(
+                Q(bill_number__icontains=search) |
+                Q(patient__user__full_name__icontains=search)
+            )
+        
+        date_from = request.query_params.get('date_from')
+        date_to = request.query_params.get('date_to')
+        if date_from:
+            bills = bills.filter(bill_date__date__gte=date_from)
+        if date_to:
+            bills = bills.filter(bill_date__date__lte=date_to)
+        
+        bills = bills.order_by('-bill_date')
+        
+        # Pagination
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 20))
+        total = bills.count()
+        start = (page - 1) * page_size
+        end = start + page_size
+        paginated = bills[start:end]
+        
+        serializer = LabBillListSerializer(paginated, many=True)
+        
+        # Summary
+        summary = {
+            'total_bills': total,
+            'pending': bills.filter(payment_status='PENDING').count(),
+            'partial': bills.filter(payment_status='PARTIAL').count(),
+            'paid': bills.filter(payment_status='PAID').count(),
+            'cancelled': bills.filter(payment_status='CANCELLED').count(),
+            'total_revenue': bills.aggregate(Sum('total'))['total__sum'] or 0,
+            'total_balance': bills.aggregate(Sum('balance_due'))['balance_due__sum'] or 0,
+        }
+        
+        return Response({
+            'success': True,
+            'data': serializer.data,
+            'summary': summary,
+            'pagination': {
+                'page': page,
+                'page_size': page_size,
+                'total_pages': (total + page_size - 1) // page_size if page_size > 0 else 1,
+                'total': total
+            }
+        })
+    
+    def post(self, request):
+        """Create new lab bill and push to Finance"""
+        if not check_lab_access(request.user) and request.user.role not in ['ADM', 'REC']:
+            return Response({
+                'success': False,
+                'error': 'Access denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        serializer = LabBillCreateSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response({
+                'success': False,
+                'errors': serializer.errors
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        data = serializer.validated_data
+        patient_id = data['patient_id']
+        test_ids = data['test_ids']
+        quantities = data.get('quantities', [1] * len(test_ids))
+        discount_percentage = data.get('discount_percentage', 0)
+        tax_percentage = data.get('tax_percentage', 0)
+        payment_method = data.get('payment_method', 'CASH')
+        notes = data.get('notes', '')
+        lab_record_ids = data.get('lab_record_ids', [])
+        
+        # Get patient
+        try:
+            from patients.models import PatientProfile
+            patient = PatientProfile.objects.get(id=patient_id)
+        except PatientProfile.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Patient not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        # Get tests and calculate subtotal
+        tests = []
+        subtotal = 0
+        
+        for i, test_id in enumerate(test_ids):
+            try:
+                test = LabTestType.objects.get(id=test_id, is_active=True)
+            except LabTestType.DoesNotExist:
+                return Response({
+                    'success': False,
+                    'error': f'Test type {test_id} not found'
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            qty = quantities[i] if i < len(quantities) else 1
+            price = test.price or Decimal('0.00')
+            
+            tests.append({
+                'test': test,
+                'quantity': qty,
+                'unit_price': price,
+            })
+            subtotal += price * qty
+        
+        # Get lab records to link
+        lab_records = []
+        if lab_record_ids:
+            lab_records = LabRecord.objects.filter(id__in=lab_record_ids, is_active=True)
+        
+        # ============================================================
+        # 🔥 START ATOMIC TRANSACTION
+        # ============================================================
+        with transaction.atomic():
+            
+            # Calculate discount and tax
+            discount = (subtotal * discount_percentage) / 100
+            taxable_amount = subtotal - discount
+            tax = (taxable_amount * tax_percentage) / 100
+            total = taxable_amount + tax
+            
+            # Create bill
+            bill = LabBill.objects.create(
+                patient=patient,
+                subtotal=subtotal,
+                discount=discount,
+                discount_percentage=discount_percentage,
+                tax=tax,
+                tax_percentage=tax_percentage,
+                total=total,
+                payment_status='PENDING',
+                payment_method=payment_method,
+                notes=notes,
+                created_by=request.user
+            )
+            
+            # Create bill items
+            for item in tests:
+                LabBillItem.objects.create(
+                    bill=bill,
+                    test_type=item['test'],
+                    test_name=item['test'].name,
+                    quantity=item['quantity'],
+                    unit_price=item['unit_price'],
+                    discount=0
+                )
+            
+            # Link lab records
+            if lab_records:
+                bill.lab_records.set(lab_records)
+            
+            # ============================================================
+            # 🚀 INTEGRATION WITH FINANCE APP
+            # ============================================================
+            try:
+                from finance.services import JournalService
+                
+                finance_payment_type = 'CASH' if payment_method in ['CASH', 'ONLINE'] else 'CREDIT'
+                
+                entry = JournalService.process_bill(
+                    source_type='LAB',
+                    source_id=bill.bill_number,
+                    total_amount=bill.total,
+                    revenue_account_code='4200',  # Lab Revenue
+                    payment_type=finance_payment_type
+                )
+                
+                bill.journal_entry_id = entry.id
+                bill.save(update_fields=['journal_entry_id'])
+                
+            except Exception as e:
+                return Response({
+                    'success': False,
+                    'error': f'Finance integration failed: {str(e)}'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            return Response({
+                'success': True,
+                'message': 'Lab bill created successfully and pushed to Finance',
+                'data': LabBillSerializer(bill).data
+            }, status=status.HTTP_201_CREATED)
+
+
+class LabBillDetailView(APIView):
+    """
+    GET /api/lab/bills/{id}/ - Get bill details
+    DELETE /api/lab/bills/{id}/ - Delete/cancel bill
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request, pk):
+        """Get bill details"""
+        if not check_lab_access(request.user) and request.user.role not in ['ADM', 'REC']:
+            return Response({
+                'success': False,
+                'error': 'Access denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            bill = LabBill.objects.select_related(
+                'patient__user', 'created_by'
+            ).prefetch_related('items__test_type', 'payments', 'lab_records').get(id=pk)
+        except LabBill.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Bill not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        serializer = LabBillSerializer(bill)
+        return Response({
+            'success': True,
+            'data': serializer.data
+        })
+    
+    def delete(self, request, pk):
+        """Cancel bill"""
+        if not check_lab_access(request.user) and request.user.role not in ['ADM', 'REC']:
+            return Response({
+                'success': False,
+                'error': 'Access denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            bill = LabBill.objects.get(id=pk)
+        except LabBill.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Bill not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        if bill.payment_status == 'PAID':
+            return Response({
+                'success': False,
+                'error': 'Cannot delete a paid bill. Please refund first.'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        bill.payment_status = 'CANCELLED'
+        bill.save()
+        
+        return Response({
+            'success': True,
+            'message': 'Bill cancelled successfully'
+        })
+
+
+class LabPaymentView(APIView):
+    """
+    POST /api/lab/bills/{id}/pay/ - Record payment
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def post(self, request, pk):
+        """Record payment for a lab bill"""
+        if not check_lab_access(request.user) and request.user.role not in ['ADM', 'REC']:
+            return Response({
+                'success': False,
+                'error': 'Access denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            bill = LabBill.objects.get(id=pk)
+        except LabBill.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Bill not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        amount = request.data.get('amount')
+        payment_method = request.data.get('payment_method', 'CASH')
+        transaction_id = request.data.get('transaction_id', '')
+        notes = request.data.get('notes', '')
+        
+        if not amount:
+            return Response({
+                'success': False,
+                'error': 'Amount is required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            amount = float(amount)
+        except ValueError:
+            return Response({
+                'success': False,
+                'error': 'Invalid amount'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if amount <= 0:
+            return Response({
+                'success': False,
+                'error': 'Amount must be greater than 0'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        if amount > bill.balance_due:
+            return Response({
+                'success': False,
+                'error': f'Amount exceeds balance due: {bill.balance_due}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Create payment
+        payment = LabPayment.objects.create(
+            bill=bill,
+            amount=amount,
+            payment_method=payment_method,
+            transaction_id=transaction_id,
+            notes=notes,
+            received_by=request.user
+        )
+        
+        # Update bill
+        bill.amount_paid += amount
+        bill.balance_due = bill.total - bill.amount_paid
+        
+        if bill.balance_due <= 0:
+            bill.payment_status = 'PAID'
+        elif bill.amount_paid > 0:
+            bill.payment_status = 'PARTIAL'
+        
+        bill.save()
+        
+        return Response({
+            'success': True,
+            'message': 'Payment recorded successfully',
+            'data': {
+                'payment': LabPaymentSerializer(payment).data,
+                'bill': {
+                    'id': bill.id,
+                    'bill_number': bill.bill_number,
+                    'payment_status': bill.payment_status,
+                    'amount_paid': float(bill.amount_paid),
+                    'balance_due': float(bill.balance_due),
+                }
+            }
+        })
+
+
+class LabBillingDashboardView(APIView):
+    """
+    GET /api/lab/billing/dashboard/ - Billing dashboard stats
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request):
+        """Get billing dashboard statistics"""
+        if not check_lab_access(request.user) and request.user.role not in ['ADM', 'REC']:
+            return Response({
+                'success': False,
+                'error': 'Access denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        today = timezone.now().date()
+        start_of_month = today.replace(day=1)
+        start_of_week = today - timedelta(days=today.weekday())
+        
+        bills = LabBill.objects.all()
+        
+        # Today
+        today_bills = bills.filter(bill_date__date=today)
+        today_total = today_bills.aggregate(Sum('total'))['total__sum'] or 0
+        today_count = today_bills.count()
+        
+        # Week
+        week_bills = bills.filter(bill_date__date__gte=start_of_week)
+        week_total = week_bills.aggregate(Sum('total'))['total__sum'] or 0
+        week_count = week_bills.count()
+        
+        # Month
+        month_bills = bills.filter(bill_date__date__gte=start_of_month)
+        month_total = month_bills.aggregate(Sum('total'))['total__sum'] or 0
+        month_count = month_bills.count()
+        
+        # Pending
+        pending_bills = bills.filter(payment_status='PENDING')
+        pending_total = pending_bills.aggregate(Sum('balance_due'))['balance_due__sum'] or 0
+        pending_count = pending_bills.count()
+        
+        # Payment methods breakdown
+        payment_breakdown = bills.values('payment_method').annotate(
+            count=Count('id'),
+            total=Sum('total')
+        )
+        
+        # Test type revenue breakdown
+        test_revenue = LabBillItem.objects.filter(
+            bill__payment_status__in=['PAID', 'PARTIAL']
+        ).values('test_type__name').annotate(
+            total_revenue=Sum('total'),
+            count=Count('id')
+        ).order_by('-total_revenue')[:10]
+        
+        # Recent bills
+        recent_bills = bills.select_related(
+            'patient__user'
+        ).prefetch_related('items').order_by('-bill_date')[:10]
+        
+        recent_data = []
+        for bill in recent_bills:
+            recent_data.append({
+                'id': bill.id,
+                'bill_number': bill.bill_number,
+                'patient_name': bill.patient.user.full_name,
+                'total': float(bill.total),
+                'payment_status': bill.payment_status,
+                'bill_date': bill.bill_date,
+                'test_count': bill.items.count(),
+            })
+        
+        return Response({
+            'success': True,
+            'summary': {
+                'today': {
+                    'total': float(today_total),
+                    'count': today_count,
+                },
+                'week': {
+                    'total': float(week_total),
+                    'count': week_count,
+                },
+                'month': {
+                    'total': float(month_total),
+                    'count': month_count,
+                },
+                'pending': {
+                    'total': float(pending_total),
+                    'count': pending_count,
+                },
+                'total_bills': bills.count(),
+                'total_revenue': bills.aggregate(Sum('total'))['total__sum'] or 0,
+                'total_balance': bills.aggregate(Sum('balance_due'))['balance_due__sum'] or 0,
+            },
+            'payment_methods': list(payment_breakdown),
+            'test_revenue_breakdown': list(test_revenue),
+            'recent_bills': recent_data
+        })
+
+
+class LabBillByRecordView(APIView):
+    """
+    GET /api/lab/bills/by-record/{record_id}/ - Get bill for a lab record
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request, record_id):
+        """Get bill associated with a lab record"""
+        if not check_lab_access(request.user) and request.user.role not in ['ADM', 'REC']:
+            return Response({
+                'success': False,
+                'error': 'Access denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            record = LabRecord.objects.get(id=record_id, is_active=True)
+        except LabRecord.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Lab record not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        bills = record.bills.all()
+        
+        if not bills.exists():
+            return Response({
+                'success': True,
+                'has_bill': False,
+                'message': 'No bill associated with this record'
+            })
+        
+        serializer = LabBillListSerializer(bills, many=True)
+        
+        return Response({
+            'success': True,
+            'has_bill': True,
+            'bills': serializer.data
+        })
+
+
+class LabBillByPatientView(APIView):
+    """
+    GET /api/lab/bills/patient/{patient_id}/ - Get all bills for a patient
+    """
+    permission_classes = [IsAuthenticated]
+    
+    def get(self, request, patient_id):
+        """Get all bills for a specific patient"""
+        if not check_lab_access(request.user) and request.user.role not in ['ADM', 'REC']:
+            return Response({
+                'success': False,
+                'error': 'Access denied'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        try:
+            from patients.models import PatientProfile
+            patient = PatientProfile.objects.get(id=patient_id)
+        except PatientProfile.DoesNotExist:
+            return Response({
+                'success': False,
+                'error': 'Patient not found'
+            }, status=status.HTTP_404_NOT_FOUND)
+        
+        bills = LabBill.objects.filter(patient=patient).order_by('-bill_date')
+        
+        serializer = LabBillListSerializer(bills, many=True)
+        
+        return Response({
+            'success': True,
+            'patient': {
+                'id': patient.id,
+                'name': patient.user.full_name,
+                'mrn': patient.patient_id,
+            },
+            'total_bills': bills.count(),
+            'total_amount': bills.aggregate(Sum('total'))['total__sum'] or 0,
+            'balance_due': bills.aggregate(Sum('balance_due'))['balance_due__sum'] or 0,
+            'bills': serializer.data
         })

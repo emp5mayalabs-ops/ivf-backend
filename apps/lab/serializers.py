@@ -1,3 +1,5 @@
+# lab/serializers.py - Complete with Billing Serializers
+
 from rest_framework import serializers
 from django.contrib.auth import authenticate
 from accounts.models import User
@@ -6,8 +8,13 @@ from .models import (
     AndrologyLabTechnician,
     LabTestType,
     LabField,
-    LabRecord
+    LabRecord,
+    # Billing models
+    LabBill,
+    LabBillItem,
+    LabPayment,
 )
+from decimal import Decimal
 
 
 # ========== EXISTING SERIALIZERS ==========
@@ -138,7 +145,7 @@ class LabTestTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = LabTestType
         fields = [
-            'id', 'name', 'code', 'icon', 'color', 'description',
+            'id', 'name', 'code', 'icon', 'color', 'description', 'price',
             'is_active', 'display_order', 'fields', 'field_count',
             'record_count', 'created_by', 'created_by_name',
             'created_at', 'updated_at'
@@ -162,7 +169,7 @@ class LabTestTypeCreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = LabTestType
         fields = [
-            'id', 'name', 'code', 'icon', 'color', 'description',
+            'id', 'name', 'code', 'icon', 'color', 'description', 'price',
             'is_active', 'display_order', 'fields'
         ]
     
@@ -199,7 +206,7 @@ class LabRecordSerializer(serializers.ModelSerializer):
     created_by_name = serializers.SerializerMethodField()
     updated_by_name = serializers.SerializerMethodField()
     display_fields = serializers.SerializerMethodField()
-    token_number = serializers.IntegerField(read_only=True)  # 🆕 Added token number
+    token_number = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = LabRecord
@@ -356,7 +363,7 @@ class LabOrderListSerializer(serializers.ModelSerializer):
     ordered_by_name = serializers.SerializerMethodField()
     priority_display = serializers.SerializerMethodField()
     status_display = serializers.SerializerMethodField()
-    token_number = serializers.IntegerField(read_only=True)  # 🆕 Token number
+    token_number = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = LabRecord
@@ -384,3 +391,177 @@ class LabOrderListSerializer(serializers.ModelSerializer):
     
     def get_status_display(self, obj):
         return obj.get_status_display() if hasattr(obj, 'get_status_display') else obj.status
+
+
+# ============================================================
+# 🆕 LAB BILLING SERIALIZERS
+# ============================================================
+
+class LabBillItemSerializer(serializers.ModelSerializer):
+    """Serializer for lab bill items"""
+    test_name = serializers.CharField(source='test_type.name', read_only=True)
+    test_code = serializers.CharField(source='test_type.code', read_only=True)
+    
+    class Meta:
+        model = LabBillItem
+        fields = [
+            'id', 'test_type', 'test_name', 'test_code',
+            'quantity', 'unit_price', 'discount', 'total'
+        ]
+        read_only_fields = ['total']
+
+
+class LabPaymentSerializer(serializers.ModelSerializer):
+    """Serializer for lab payments"""
+    received_by_name = serializers.CharField(source='received_by.full_name', read_only=True)
+    
+    class Meta:
+        model = LabPayment
+        fields = [
+            'id', 'amount', 'payment_method', 'transaction_id',
+            'payment_date', 'notes', 'received_by', 'received_by_name'
+        ]
+        read_only_fields = ['id', 'payment_date', 'received_by']
+
+
+class LabBillSerializer(serializers.ModelSerializer):
+    """Serializer for lab bills (detail view)"""
+    patient_name = serializers.CharField(source='patient.user.full_name', read_only=True)
+    patient_mrn = serializers.CharField(source='patient.patient_id', read_only=True)
+    items = LabBillItemSerializer(many=True, read_only=True)
+    payments = LabPaymentSerializer(many=True, read_only=True)
+    lab_record_ids = serializers.SerializerMethodField()
+    created_by_name = serializers.CharField(source='created_by.full_name', read_only=True)
+    
+    class Meta:
+        model = LabBill
+        fields = [
+            'id', 'bill_number', 'bill_date',
+            'patient', 'patient_name', 'patient_mrn',
+            'subtotal', 'discount', 'discount_percentage',
+            'tax', 'tax_percentage', 'total',
+            'payment_status', 'payment_method',
+            'amount_paid', 'balance_due',
+            'items', 'payments', 'lab_record_ids',
+            'journal_entry_id',
+            'notes', 'created_by', 'created_by_name',
+            'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'bill_number', 'journal_entry_id',
+            'created_at', 'updated_at', 'created_by'
+        ]
+    
+    def get_lab_record_ids(self, obj):
+        return list(obj.lab_records.values_list('id', flat=True))
+
+
+class LabBillListSerializer(serializers.ModelSerializer):
+    """Serializer for lab bills (list view)"""
+    patient_name = serializers.CharField(source='patient.user.full_name', read_only=True)
+    patient_mrn = serializers.CharField(source='patient.patient_id', read_only=True)
+    test_count = serializers.SerializerMethodField()
+    
+    class Meta:
+        model = LabBill
+        fields = [
+            'id', 'bill_number', 'bill_date',
+            'patient', 'patient_name', 'patient_mrn',
+            'total', 'payment_status',
+            'amount_paid', 'balance_due',
+            'test_count', 'journal_entry_id'
+        ]
+    
+    def get_test_count(self, obj):
+        return obj.items.count()
+
+
+class LabBillCreateSerializer(serializers.Serializer):
+    """Serializer for creating a new lab bill"""
+    patient_id = serializers.IntegerField(required=True)
+    test_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=True,
+        help_text="List of LabTestType IDs"
+    )
+    quantities = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        required=False,
+        help_text="Optional quantities for each test"
+    )
+    discount_percentage = serializers.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        default=Decimal('0.00')
+    )
+    tax_percentage = serializers.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        default=Decimal('0.00')
+    )
+    payment_method = serializers.ChoiceField(
+        choices=['CASH', 'CARD', 'ONLINE', 'INSURANCE', 'CREDIT'],
+        default='CASH'
+    )
+    notes = serializers.CharField(required=False, allow_blank=True)
+    lab_record_ids = serializers.ListField(
+        child=serializers.IntegerField(),
+        required=False,
+        help_text="Optional LabRecord IDs to link to this bill"
+    )
+    
+    def validate(self, data):
+        # Validate quantities match test_ids
+        if 'quantities' in data and data['quantities']:
+            if len(data['quantities']) != len(data['test_ids']):
+                raise serializers.ValidationError(
+                    "Quantities must have the same length as test_ids"
+                )
+        
+        # Validate tax and discount percentages
+        if data.get('discount_percentage', 0) > 100:
+            raise serializers.ValidationError(
+                "Discount percentage cannot exceed 100"
+            )
+        
+        if data.get('tax_percentage', 0) > 100:
+            raise serializers.ValidationError(
+                "Tax percentage cannot exceed 100"
+            )
+        
+        # Validate test IDs exist
+        for test_id in data['test_ids']:
+            if not LabTestType.objects.filter(id=test_id, is_active=True).exists():
+                raise serializers.ValidationError(
+                    f"Test type with ID {test_id} not found"
+                )
+        
+        return data
+
+
+class LabPaymentCreateSerializer(serializers.Serializer):
+    """Serializer for recording a payment"""
+    amount = serializers.DecimalField(
+        max_digits=12, 
+        decimal_places=2,
+        min_value=Decimal('0.01')
+    )
+    payment_method = serializers.ChoiceField(
+        choices=['CASH', 'CARD', 'ONLINE', 'INSURANCE', 'CREDIT'],
+        default='CASH'
+    )
+    transaction_id = serializers.CharField(required=False, allow_blank=True)
+    notes = serializers.CharField(required=False, allow_blank=True)
+
+
+class LabBillDashboardSerializer(serializers.Serializer):
+    """Serializer for lab billing dashboard"""
+    total_bills = serializers.IntegerField()
+    pending_bills = serializers.IntegerField()
+    paid_bills = serializers.IntegerField()
+    total_revenue = serializers.DecimalField(max_digits=12, decimal_places=2)
+    pending_amount = serializers.DecimalField(max_digits=12, decimal_places=2)
+    today_revenue = serializers.DecimalField(max_digits=12, decimal_places=2)
+    month_revenue = serializers.DecimalField(max_digits=12, decimal_places=2)
+    payment_method_breakdown = serializers.JSONField()
+    test_revenue_breakdown = serializers.JSONField()
