@@ -685,6 +685,7 @@ class PharmacyBill(models.Model):
     payment_method = models.CharField(max_length=20, blank=True)
     amount_paid = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     balance_due = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    journal_entry_id = models.IntegerField(null=True, blank=True, help_text="Finance Journal Entry ID")
     
     # Reference to prescription order (optional)
     prescription = models.ForeignKey(

@@ -8,6 +8,8 @@ from django.contrib.auth import login, logout
 from django.utils import timezone
 from django.db.models import Q, Count, Sum, F
 from datetime import timedelta
+from django.db import transaction
+from finance.services import JournalService 
 
 from .models import (
     PharmacistProfile, Medication, MedicationCategory,
@@ -1591,7 +1593,7 @@ class PrescriptionOrderStatsView(APIView):
 class PharmacyBillListView(APIView):
     """
     GET /api/pharmacy/bills/ - List all bills
-    POST /api/pharmacy/bills/ - Create new bill
+    POST /api/pharmacy/bills/ - Create new bill & push to Finance
     """
     permission_classes = [IsAuthenticated, IsPharmacist]
     
@@ -1642,6 +1644,7 @@ class PharmacyBillListView(APIView):
                 'payment_status_display': bill.get_payment_status_display(),
                 'amount_paid': float(bill.amount_paid),
                 'balance_due': float(bill.balance_due),
+                'journal_entry_id': bill.journal_entry_id,  # Added this field
                 'items': [
                     {
                         'medication_name': item.medication.name,
@@ -1666,7 +1669,7 @@ class PharmacyBillListView(APIView):
         })
     
     def post(self, request):
-        """Create new bill"""
+        """Create new bill and push to Finance"""
         patient_id = request.data.get('patient')
         items_data = request.data.get('items', [])
         discount_percentage = request.data.get('discount_percentage', 0)
@@ -1704,87 +1707,123 @@ class PharmacyBillListView(APIView):
             except PrescriptionOrder.DoesNotExist:
                 pass
         
-        # Calculate subtotal
-        subtotal = 0
-        bill_items = []
-        for item in items_data:
-            medication_id = item.get('medication_id')
-            quantity = item.get('quantity', 1)
-            unit_price = item.get('unit_price', 0)
-            item_discount = item.get('discount', 0)
+        # ============================================================
+        # 🔥 START ATOMIC TRANSACTION
+        # If anything fails, everything rolls back
+        # ============================================================
+        with transaction.atomic():
             
-            try:
-                medication = Medication.objects.get(id=medication_id)
-            except Medication.DoesNotExist:
-                return Response({
-                    'success': False,
-                    'error': f'Medication {medication_id} not found'
-                }, status=status.HTTP_404_NOT_FOUND)
+            # Calculate subtotal
+            subtotal = 0
+            bill_items = []
+            for item in items_data:
+                medication_id = item.get('medication_id')
+                quantity = item.get('quantity', 1)
+                unit_price = item.get('unit_price', 0)
+                item_discount = item.get('discount', 0)
+                
+                try:
+                    medication = Medication.objects.get(id=medication_id)
+                except Medication.DoesNotExist:
+                    return Response({
+                        'success': False,
+                        'error': f'Medication {medication_id} not found'
+                    }, status=status.HTTP_404_NOT_FOUND)
+                
+                # Check stock
+                if medication.current_stock < quantity:
+                    return Response({
+                        'success': False,
+                        'error': f'Insufficient stock for {medication.name}. Available: {medication.current_stock}'
+                    }, status=status.HTTP_400_BAD_REQUEST)
+                
+                item_total = unit_price * quantity - item_discount
+                subtotal += item_total
+                
+                bill_items.append({
+                    'medication': medication,
+                    'quantity': quantity,
+                    'unit_price': unit_price,
+                    'discount': item_discount
+                })
             
-            # Check stock
-            if medication.current_stock < quantity:
-                return Response({
-                    'success': False,
-                    'error': f'Insufficient stock for {medication.name}. Available: {medication.current_stock}'
-                }, status=status.HTTP_400_BAD_REQUEST)
+            # Calculate discount and tax
+            discount = (subtotal * discount_percentage) / 100
+            taxable_amount = subtotal - discount
+            tax = (taxable_amount * tax_percentage) / 100
+            total = taxable_amount + tax
             
-            item_total = unit_price * quantity - item_discount
-            subtotal += item_total
-            
-            bill_items.append({
-                'medication': medication,
-                'quantity': quantity,
-                'unit_price': unit_price,
-                'discount': item_discount
-            })
-        
-        # Calculate discount and tax
-        discount = (subtotal * discount_percentage) / 100
-        taxable_amount = subtotal - discount
-        tax = (taxable_amount * tax_percentage) / 100
-        total = taxable_amount + tax
-        
-        # Create bill
-        bill = PharmacyBill.objects.create(
-            patient=patient,
-            subtotal=subtotal,
-            discount=discount,
-            discount_percentage=discount_percentage,
-            tax=tax,
-            tax_percentage=tax_percentage,
-            total=total,
-            payment_status='PENDING',
-            payment_method=payment_method,
-            prescription=prescription,
-            notes=notes,
-            created_by=request.user
-        )
-        
-        # Create bill items and update stock
-        for item in bill_items:
-            PharmacyBillItem.objects.create(
-                bill=bill,
-                medication=item['medication'],
-                quantity=item['quantity'],
-                unit_price=item['unit_price'],
-                discount=item['discount']
+            # Create bill
+            bill = PharmacyBill.objects.create(
+                patient=patient,
+                subtotal=subtotal,
+                discount=discount,
+                discount_percentage=discount_percentage,
+                tax=tax,
+                tax_percentage=tax_percentage,
+                total=total,
+                payment_status='PENDING',
+                payment_method=payment_method,
+                prescription=prescription,
+                notes=notes,
+                created_by=request.user
             )
             
-            # Update stock
-            item['medication'].current_stock -= item['quantity']
-            item['medication'].save()
+            # Create bill items and update stock
+            for item in bill_items:
+                PharmacyBillItem.objects.create(
+                    bill=bill,
+                    medication=item['medication'],
+                    quantity=item['quantity'],
+                    unit_price=item['unit_price'],
+                    discount=item['discount']
+                )
+                
+                # Update stock
+                item['medication'].current_stock -= item['quantity']
+                item['medication'].save()
+            
+            # ============================================================
+            # 🚀 INTEGRATION WITH FINANCE APP
+            # Push the bill to the central General Ledger
+            # ============================================================
+            try:
+                # Map payment_type: 'CASH' or 'CREDIT'
+                finance_payment_type = 'CASH' if payment_method in ['CASH', 'ONLINE'] else 'CREDIT'
+                
+                entry = JournalService.process_bill(
+                    source_type='PHARMACY',
+                    source_id=bill.bill_number,
+                    total_amount=bill.total,
+                    revenue_account_code='4100',  # Pharmacy Revenue
+                    payment_type=finance_payment_type
+                )
+                
+                # Store the journal entry ID on the bill for reference
+                bill.journal_entry_id = entry.id
+                bill.save(update_fields=['journal_entry_id'])
+                
+            except Exception as e:
+                # If finance integration fails, the whole transaction rolls back
+                # No bill is created, no stock is deducted
+                return Response({
+                    'success': False,
+                    'error': f'Finance integration failed: {str(e)}'
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            # ============================================================
+            
+            return Response({
+                'success': True,
+                'message': 'Bill created successfully and pushed to Finance',
+                'data': {
+                    'id': bill.id,
+                    'bill_number': bill.bill_number,
+                    'total': float(bill.total),
+                    'payment_status': bill.payment_status,
+                    'journal_entry_id': bill.journal_entry_id,
+                }
+            }, status=status.HTTP_201_CREATED)
         
-        return Response({
-            'success': True,
-            'message': 'Bill created successfully',
-            'data': {
-                'id': bill.id,
-                'bill_number': bill.bill_number,
-                'total': float(bill.total),
-                'payment_status': bill.payment_status
-            }
-        }, status=status.HTTP_201_CREATED)
-
 
 class PharmacyBillDetailView(APIView):
     """

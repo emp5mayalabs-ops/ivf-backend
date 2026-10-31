@@ -69,6 +69,7 @@ INSTALLED_APPS = [
     'nurse',
     'embryology',
     'andrology',  
+    'hospital_settings',
 
     
 ]

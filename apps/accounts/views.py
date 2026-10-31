@@ -712,161 +712,166 @@ class StaffManagementViewSet(viewsets.ModelViewSet):
     # 🆕 STAFF DIRECTORY - For Receptionists
     # ================================================================
 
-    # accounts/views.py - Inside StaffManagementViewSet
-
-@action(detail=False, methods=['get'], url_path='staff-directory', permission_classes=[IsAuthenticated])
-def staff_directory(self, request):
-    """
-    GET /api/accounts/staff-management/staff-directory/
-    GET /api/accounts/staff-management/staff-directory/?search=john
-    GET /api/accounts/staff-management/staff-directory/?role=GYN
-    GET /api/accounts/staff-management/staff-directory/?department=2
-    
-    
-    Receptionist can view all staff details (doctors, nurses, lab staff, etc.)
-    """
-    # Only receptionists can access this
-    if request.user.role != 'REC':
-        return Response({
-            'success': False,
-            'error': 'Access denied. Only receptionists can view staff directory.'
-        }, status=status.HTTP_403_FORBIDDEN)
-    
-    # Get query parameters
-    staff_id = request.query_params.get('id')
-    search = request.query_params.get('search', '').strip()
-    role_filter = request.query_params.get('role')
-    department_id = request.query_params.get('department')
-    is_active_filter = request.query_params.get('is_active')
-    
-    # ========== PAGINATION PARAMETERS ==========
-    page = int(request.query_params.get('page', 1))
-    page_size = int(request.query_params.get('page_size', 20))
-    
-    # Base queryset - exclude patients and donors
-    staff = User.objects.exclude(role__in=['PAT', 'DON'])
-    
-    # Filter by specific ID
-    if staff_id:
-        try:
-            staff = staff.filter(id=staff_id)
-        except ValueError:
+    @action(detail=False, methods=['get'], url_path='staff-directory', permission_classes=[AllowAny])
+    def staff_directory(self, request):
+        """
+        GET /api/staff-management/staff-directory/
+        GET /api/staff-management/staff-directory/?search=john
+        GET /api/staff-management/staff-directory/?role=GYN
+        GET /api/staff-management/staff-directory/?department=2
+        GET /api/staff-management/staff-directory/?page=1&page_size=20
+        
+        Receptionist can view all staff details (doctors, nurses, lab staff, etc.)
+        """
+        # Check authentication first
+        if not request.user.is_authenticated:
             return Response({
                 'success': False,
-                'error': 'Invalid staff ID'
-            }, status=status.HTTP_400_BAD_REQUEST)
-    
-    # Filter by search term (name or email)
-    if search:
-        staff = staff.filter(
-            Q(full_name__icontains=search) |
-            Q(email__icontains=search)
-        )
-    
-    # Filter by role
-    if role_filter:
-        staff = staff.filter(role=role_filter)
-    
-    # Filter by department
-    if department_id:
-        try:
-            department_id = int(department_id)
+                'error': 'Authentication required. Please login.'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+        # Only receptionists can access this
+        if request.user.role != 'REC':
+            return Response({
+                'success': False,
+                'error': 'Access denied. Only receptionists can view staff directory.'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        # Get query parameters
+        staff_id = request.query_params.get('id')
+        search = request.query_params.get('search', '').strip()
+        role_filter = request.query_params.get('role')
+        department_id = request.query_params.get('department')
+        is_active_filter = request.query_params.get('is_active')
+        
+        # ========== PAGINATION PARAMETERS ==========
+        page = int(request.query_params.get('page', 1))
+        page_size = int(request.query_params.get('page_size', 20))
+        
+        # Base queryset - exclude patients and donors
+        staff = User.objects.exclude(role__in=['PAT', 'DON'])
+        
+        # Filter by specific ID
+        if staff_id:
+            try:
+                staff = staff.filter(id=staff_id)
+            except ValueError:
+                return Response({
+                    'success': False,
+                    'error': 'Invalid staff ID'
+                }, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Filter by search term (name or email)
+        if search:
             staff = staff.filter(
-                staff_assignments__department_id=department_id,
-                staff_assignments__is_active=True
-            ).distinct()
-        except ValueError:
-            return Response({
-                'success': False,
-                'error': 'Invalid department ID'
-            }, status=status.HTTP_400_BAD_REQUEST)
-    
-    # Filter by active status
-    if is_active_filter is not None:
-        is_active = is_active_filter.lower() == 'true'
-        staff = staff.filter(is_active=is_active)
-    
-    # Order by name
-    staff = staff.order_by('full_name')
-    
-    # ========== GET TOTAL COUNT BEFORE PAGINATION ==========
-    total = staff.count()
-    
-    # ========== APPLY PAGINATION ==========
-    start = (page - 1) * page_size
-    end = start + page_size
-    paginated_staff = staff[start:end]
-    
-    # ========== CALCULATE TOTAL PAGES ==========
-    total_pages = (total + page_size - 1) // page_size if page_size > 0 else 1
-    
-    # Build response data with full details
-    staff_data = []
-    for person in paginated_staff:
-        # Get primary department assignment
-        primary_dept = person.staff_assignments.filter(
-            role_in_dept='PRIMARY',
-            is_active=True
-        ).select_related('department').first()
+                Q(full_name__icontains=search) |
+                Q(email__icontains=search)
+            )
         
-        # Get all department assignments
-        all_depts = person.staff_assignments.filter(
-            is_active=True
-        ).select_related('department')
-        department_names = [dept.department.name for dept in all_depts if dept.department]
+        # Filter by role
+        if role_filter:
+            staff = staff.filter(role=role_filter)
         
-        # Get role-specific profile data
-        profile_data = self._get_role_profile(person)
+        # Filter by department
+        if department_id:
+            try:
+                department_id = int(department_id)
+                staff = staff.filter(
+                    staff_assignments__department_id=department_id,
+                    staff_assignments__is_active=True
+                ).distinct()
+            except ValueError:
+                return Response({
+                    'success': False,
+                    'error': 'Invalid department ID'
+                }, status=status.HTTP_400_BAD_REQUEST)
         
-        staff_data.append({
-            'id': person.id,
-            'full_name': person.full_name,
-            'email': person.email,
-            'role': person.role,
-            'role_display': person.get_role_display(),
-            'is_active': person.is_active,
-            'primary_department': {
-                'id': primary_dept.department.id if primary_dept else None,
-                'name': primary_dept.department.name if primary_dept else None,
-                'code': primary_dept.department.code if primary_dept else None,
-            } if primary_dept else None,
-            'departments': department_names,
-            'profile': profile_data,
-            'date_joined': person.date_joined.strftime('%Y-%m-%d') if person.date_joined else None,
-            'last_login': person.last_login.strftime('%Y-%m-%d %H:%M') if person.last_login else None,
-        })
-    
-    # Get role counts for summary (based on filtered results)
-    role_counts = {}
-    for person in staff:
-        role_counts[person.role] = role_counts.get(person.role, 0) + 1
-    
-    # Get department counts for summary (based on filtered results)
-    dept_counts = {}
-    for person in staff:
-        for dept in person.staff_assignments.filter(is_active=True).select_related('department'):
-            dept_name = dept.department.name
-            dept_counts[dept_name] = dept_counts.get(dept_name, 0) + 1
-    
-    return Response({
-        'success': True,
-        'total': total,
-        'page': page,
-        'page_size': page_size,
-        'total_pages': total_pages,
-        'role_counts': role_counts,
-        'department_counts': dept_counts,
-        'staff': staff_data
-    }, status=status.HTTP_200_OK)
+        # Filter by active status
+        if is_active_filter is not None:
+            is_active = is_active_filter.lower() == 'true'
+            staff = staff.filter(is_active=is_active)
+        
+        # Order by name
+        staff = staff.order_by('full_name')
+        
+        # ========== GET TOTAL COUNT BEFORE PAGINATION ==========
+        total = staff.count()
+        
+        # ========== APPLY PAGINATION ==========
+        start = (page - 1) * page_size
+        end = start + page_size
+        paginated_staff = staff[start:end]
+        
+        # ========== CALCULATE TOTAL PAGES ==========
+        total_pages = (total + page_size - 1) // page_size if page_size > 0 else 1
+        
+        # Build response data with full details
+        staff_data = []
+        for person in paginated_staff:
+            # Get primary department assignment
+            primary_dept = person.staff_assignments.filter(
+                role_in_dept='PRIMARY',
+                is_active=True
+            ).select_related('department').first()
+            
+            # Get all department assignments
+            all_depts = person.staff_assignments.filter(
+                is_active=True
+            ).select_related('department')
+            department_names = [dept.department.name for dept in all_depts if dept.department]
+            
+            # Get role-specific profile data
+            profile_data = self._get_role_profile(person)
+            
+            staff_data.append({
+                'id': person.id,
+                'full_name': person.full_name,
+                'email': person.email,
+                'role': person.role,
+                'role_display': person.get_role_display(),
+                'is_active': person.is_active,
+                'primary_department': {
+                    'id': primary_dept.department.id if primary_dept else None,
+                    'name': primary_dept.department.name if primary_dept else None,
+                    'code': primary_dept.department.code if primary_dept else None,
+                } if primary_dept else None,
+                'departments': department_names,
+                'profile': profile_data,
+                'date_joined': person.date_joined.strftime('%Y-%m-%d') if person.date_joined else None,
+                'last_login': person.last_login.strftime('%Y-%m-%d %H:%M') if person.last_login else None,
+            })
+        
+        # Get role counts for summary (based on filtered results)
+        role_counts = {}
+        for person in staff:
+            role_counts[person.role] = role_counts.get(person.role, 0) + 1
+        
+        # Get department counts for summary (based on filtered results)
+        dept_counts = {}
+        for person in staff:
+            for dept in person.staff_assignments.filter(is_active=True).select_related('department'):
+                dept_name = dept.department.name
+                dept_counts[dept_name] = dept_counts.get(dept_name, 0) + 1
+        
+        return Response({
+            'success': True,
+            'total': total,
+            'page': page,
+            'page_size': page_size,
+            'total_pages': total_pages,
+            'role_counts': role_counts,
+            'department_counts': dept_counts,
+            'staff': staff_data
+        }, status=status.HTTP_200_OK)
 
     # ================================================================
     # 🆕 STAFF DETAIL - Get Individual Staff Details
     # ================================================================
 
-    @action(detail=True, methods=['get'], url_path='staff-detail', permission_classes=[IsAuthenticated])
+    @action(detail=True, methods=['get'], url_path='staff-detail', permission_classes=[AllowAny])
     def staff_detail(self, request, pk=None):
         """
-        GET /api/accounts/staff-management/{id}/staff-detail/
+        GET /api/staff-management/{id}/staff-detail/
         Get complete details of a single staff member by ID
         
         Response includes:
@@ -876,6 +881,13 @@ def staff_directory(self, request):
         - Permissions
         - Statistics
         """
+        # Check authentication first
+        if not request.user.is_authenticated:
+            return Response({
+                'success': False,
+                'error': 'Authentication required. Please login.'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
         # Only receptionists can access this
         if request.user.role != 'REC':
             return Response({
